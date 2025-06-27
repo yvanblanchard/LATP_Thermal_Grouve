@@ -21,35 +21,6 @@ HEAT FLUX CONVERSION METHODOLOGY:
 3. THERMAL BOUNDARY CONDITION:
    -k(∂T/∂z)|surface = h(T_surface - T_ambient) - q"(x,t)
 
-TEMPERATURE INITIALIZATION FIX:
-===============================
-
-PROBLEM: Temperature was starting at 100-200°C instead of 20°C
-ROOT CAUSES & FIXES:
-
-1. TIME-DISTANCE CONVERSION (MAIN ISSUE):
-   OLD: distance = -velocity × t  
-        → At t=0: distance=0 (AT nip-point → immediate heating!)
-   NEW: distance = starting_distance + velocity × t
-        → At t=0: distance=starting_distance (far from heating zone → no flux)
-
-2. HEAT FLUX INTERPOLATION:
-   OLD: fill_value=(flux_sorted[0], flux_sorted[-1])  
-        → Non-zero values outside heating zone
-   NEW: fill_value=(0.0, 0.0)  
-        → Exactly zero flux outside heating zone
-
-3. BOUNDARY CONDITION VALIDATION:
-   - Added initial heat flux verification (should be ~0 W/m²)
-   - Added temperature range checking during simulation
-   - Added damped updates for numerical stability
-
-EXPECTED RESULTS:
-- Initial temperature: 20°C (ambient)
-- Temperature should gradually increase as material approaches laser
-- Peak temperature: 200-600°C (realistic for tape placement)
-- Higher velocity → lower peak temperature
-
 Key Physics:
 - Ray tracing provides spatial distribution of absorbed energy
 - Laser power conservation: ∫ q"(x,t) dx dt ≈ P_laser × η_absorption
@@ -303,7 +274,6 @@ PROCESS_PARAMS = {
     'laser_power': 1500,           # W (from problem statement)
     'velocities': [0.2, 0.3],      # m/s (from paper Figure 5)
     'laser_angles': [22, 11],      # degrees (from paper)
-    # NO artificial efficiency factors or tuning parameters!
 }
 
 # Boundary conditions (CORRECTED)
@@ -405,7 +375,7 @@ def simulate_component_heating(distance_points, flux_values, thickness, velocity
     print(f"    - Expected peak: {20 + temp_rise_estimate:.0f}°C")
     
     if temp_rise_estimate > 500:
-        print(f"    ⚠️  Physics predicts {temp_rise_estimate:.0f}°C rise - still too high!")
+        print(f"    Physics predicts {temp_rise_estimate:.0f}°C rise - still too high!")
         print(f"    This suggests the power density or exposure time calculation needs review")
     
     # CORRECTED: Proper time-distance setup
@@ -512,14 +482,7 @@ def simulate_component_heating(distance_points, flux_values, thickness, velocity
     print(f"    Maximum surface temperature: {max_temp:.1f}°C at {max_temp_distance*1000:.1f} mm from nip")
     print(f"    Temperature rise: {max_temp - initial_temp:.1f}°C")
     print(f"    Physics prediction: {temp_rise_estimate:.0f}°C")
-    print(f"    Ratio (actual/predicted): {(max_temp - initial_temp)/temp_rise_estimate:.2f}")
-    
-    if max_temp > 1000:
-        print(f"    ⚠️  Temperature > 1000°C suggests numerical or physics issue")
-    elif abs((max_temp - initial_temp) - temp_rise_estimate) / temp_rise_estimate > 0.5:
-        print(f"    ⚠️  Large discrepancy with physics prediction suggests model issue")
-    else:
-        print(f"    ✅ Results consistent with physics expectations")
+    print(f"    Ratio (actual/predicted): {(max_temp - initial_temp)/temp_rise_estimate:.2f}")    
     
     print(f"    Total component simulation: {total_sim_time:.3f} s")
     print()
@@ -682,7 +645,7 @@ def main():
     
     print("=" * 80)
     print("  THERMAL SIMULATION FOR LASER ASSISTED TAPE PLACEMENT")
-    print("  🔧 UPDATED HEAT FLUX DISTRIBUTIONS & BEAM PARAMETERS")
+    print("  UPDATED HEAT FLUX DISTRIBUTIONS & BEAM PARAMETERS")
     print("=" * 80)
     print(f"Material: APC-2 Carbon/PEEK")
     print(f"Tape thickness: {PROCESS_PARAMS['tape_thickness']*1e6:.0f} μm")
@@ -707,7 +670,7 @@ def main():
     temp_rise_physics = energy_per_area / (mass_per_area * MATERIAL_PROPS['cp'])
     expected_peak = 20 + temp_rise_physics
     
-    print(f"\n📐 BEAM CONFIGURATION:")
+    print(f"\nBEAM CONFIGURATION:")
     print(f"Beam dimensions: {beam_width*1000:.0f} × {beam_length*1000:.0f} mm")
     print(f"Beam area: {beam_area*1e6:.0f} mm²")
     print(f"Power density: {power_density/1e5:.2f} W/mm²")
