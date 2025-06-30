@@ -1,6 +1,6 @@
 """
-Corrected Thermal Model for Laser Assisted Tape Placement Process
-Combined into single file with error handling and timing
+1D Numerical Thermal Model for Laser Assisted Tape Placement Process
+(Ref: W. Grouve, ECCM14 - https://www.researchgate.net/publication/241875537_Towards_a_process_simulation_tool_for_the_laseer_assisted_tape_placement_process)
 
 HEAT FLUX CONVERSION METHODOLOGY:
 =================================
@@ -22,7 +22,7 @@ HEAT FLUX CONVERSION METHODOLOGY:
    -k(∂T/∂z)|surface = h(T_surface - T_ambient) - q"(x,t)
 
 Key Physics:
-- Ray tracing provides spatial distribution of absorbed energy
+- Spatial distribution of absorbed energy (heat fluxes) for substrate and incoming tape
 - Laser power conservation: ∫ q"(x,t) dx dt ≈ P_laser × η_absorption
 - Material motion converts spatial variation to temporal variation
 """
