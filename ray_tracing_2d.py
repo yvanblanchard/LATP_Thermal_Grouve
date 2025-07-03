@@ -50,7 +50,7 @@ class VectorizedRayBatch:
 class VectorizedSurface(ABC):
     """Abstract base class for vectorized surface operations"""
     
-    def __init__(self, surface_id: int, refractive_index: float = 1.5):
+    def __init__(self, surface_id: int, refractive_index: float = 1.8):
         self.surface_id = surface_id
         self.refractive_index = refractive_index
         
@@ -76,7 +76,7 @@ class VectorizedSurface(ABC):
 class VectorizedRoller(VectorizedSurface):
     """Vectorized roller surface - quarter circle arc with center at (0, radius)"""
     
-    def __init__(self, radius: float = 35e-3, refractive_index: float = 1.5):
+    def __init__(self, radius: float = 35e-3, refractive_index: float = 1.8):
         super().__init__(surface_id=0, refractive_index=refractive_index)
         self.radius = radius
         self.center = np.array([0.0, radius])  # Center at (0, radius)
@@ -162,7 +162,7 @@ class VectorizedRoller(VectorizedSurface):
 class VectorizedSubstrate(VectorizedSurface):
     """Vectorized substrate surface - horizontal line"""
     
-    def __init__(self, length: float = 100e-3, refractive_index: float = 1.5):
+    def __init__(self, length: float = 100e-3, refractive_index: float = 1.8):
         super().__init__(surface_id=1, refractive_index=refractive_index)
         self.length = length
         
@@ -222,7 +222,81 @@ class VectorizedSubstrate(VectorizedSurface):
         z = np.array([0, 0])
         return y, z
 
-
+class VectorizedCurvedSubstrate(VectorizedRoller):
+    """Vectorized curved substrate surface - half circle arc mirrored through Y axis"""
+    
+    def __init__(self, radius: float = 35e-3, refractive_index: float = 1.8):
+        super().__init__(radius, refractive_index)
+        self.surface_id = 1  # Override surface_id to be substrate
+        self.center = np.array([0.0, -radius])  # Mirror through Y axis: center at (0, -radius)
+        
+    def intersect_rays_vectorized(self, ray_batch: VectorizedRayBatch) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Vectorized intersection with half circle (z <= 0) centered at (0, -radius)"""
+        origins = ray_batch.origins[ray_batch.active_mask]
+        directions = ray_batch.directions[ray_batch.active_mask]
+        
+        if len(origins) == 0:
+            return np.array([], dtype=bool), np.empty((0, 2)), np.array([])
+        
+        # Use parent class logic but with mirrored center
+        rel_origins = origins - self.center[np.newaxis, :]
+        
+        a = np.sum(directions * directions, axis=1)
+        b = 2 * np.sum(rel_origins * directions, axis=1)
+        c = np.sum(rel_origins * rel_origins, axis=1) - self.radius**2
+        
+        discriminant = b**2 - 4*a*c
+        valid_disc = discriminant >= 0
+        
+        hit_mask = np.zeros(len(origins), dtype=bool)
+        intersection_points = np.full((len(origins), 2), np.nan)
+        distances = np.full(len(origins), np.inf)
+        
+        if np.any(valid_disc):
+            sqrt_disc = np.sqrt(discriminant[valid_disc])
+            a_valid = a[valid_disc]
+            b_valid = b[valid_disc]
+            
+            t1 = (-b_valid - sqrt_disc) / (2 * a_valid)
+            t2 = (-b_valid + sqrt_disc) / (2 * a_valid)
+            
+            # Check both solutions
+            for t_values in [t1, t2]:
+                forward_mask = t_values > 1e-10
+                if not np.any(forward_mask):
+                    continue
+                    
+                valid_indices = np.where(valid_disc)[0][forward_mask]
+                t_forward = t_values[forward_mask]
+                
+                points = (origins[valid_indices] + 
+                         t_forward[:, np.newaxis] * directions[valid_indices])
+                
+                # Check half circle constraints (z <= 0) - substrate in lower semicircle
+                z_valid = points[:, 1] <= 1e-10  # Z <= 0 (lower half)
+                
+                if np.any(z_valid):
+                    final_indices = valid_indices[z_valid]
+                    final_t = t_forward[z_valid]
+                    final_points = points[z_valid]
+                    
+                    # Update only if closer than existing intersection
+                    closer_mask = final_t < distances[final_indices]
+                    update_indices = final_indices[closer_mask]
+                    
+                    hit_mask[update_indices] = True
+                    intersection_points[update_indices] = final_points[closer_mask]
+                    distances[update_indices] = final_t[closer_mask]
+        
+        return hit_mask, intersection_points, distances
+    
+    def get_points_for_plotting(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Get half circle points for plotting - center at (0, -radius) lower semicircle"""
+        theta = np.linspace(0, np.pi, 100)  # From 0 to pi for full lower semicircle
+        y = self.center[0] + self.radius * np.cos(theta)
+        z = self.center[1] + self.radius * np.sin(theta)
+        return y, z
+    
 class VectorizedLaser:
     """Vectorized laser source definition"""
     
@@ -541,7 +615,17 @@ class VectorizedRayTracer:
             z_points = np.zeros_like(y_points)
             positions = np.column_stack([y_points, z_points])
             
-        else:  # Roller
+        elif isinstance(surface, VectorizedCurvedSubstrate):
+            # For curved substrate (semicircle) - arc distance from nip point (0,0)
+            theta_points = np.linspace(0, np.pi, num_points)  # From 0 to pi (full semicircle)
+            y_points = surface.center[0] + surface.radius * np.cos(theta_points)
+            z_points = surface.center[1] + surface.radius * np.sin(theta_points)
+            positions = np.column_stack([y_points, z_points])
+            # Arc distance from nip point (0,0) along the curved substrate surface
+            # theta = 0 is at (radius, -radius), theta = pi/2 is nip point (0,0), theta = pi is at (-radius, -radius)
+            distances_from_nip = np.abs(theta_points - np.pi/2) * surface.radius
+            
+        else:  # VectorizedRoller
             # For roller (quarter circle) - arc distance from nip point (0,0)
             theta_points = np.linspace(np.pi, 3*np.pi/2, num_points)  # From pi to 3pi/2
             y_points = surface.center[0] + surface.radius * np.cos(theta_points)
@@ -550,11 +634,7 @@ class VectorizedRayTracer:
             # Arc distance from nip point (0,0) along the roller surface
             # theta = 3*pi/2 is nip point (distance 0), theta = pi is farthest point
             distances_from_nip = (3*np.pi/2 - theta_points) * surface.radius
-        
-        # Calculate absorption fraction for this surface 
-        n1, n2 = 1.0, surface.refractive_index
-        absorption_fraction = 1.0 - ((n1 - n2) / (n1 + n2))**2
-        
+
         # Store irradiance for each generation
         irradiance_by_generation = []
         total_hits = 0
@@ -574,6 +654,7 @@ class VectorizedRayTracer:
             total_hits += num_hits
             hit_points = batch.intersection_points[surface_hits]
             hit_powers = batch.powers[surface_hits]
+            hit_directions = batch.directions[surface_hits]
             
             # Remove any NaN intersection points
             valid_hits = ~np.isnan(hit_points).any(axis=1)
@@ -583,6 +664,20 @@ class VectorizedRayTracer:
                 
             hit_points = hit_points[valid_hits]
             hit_powers = hit_powers[valid_hits]
+            hit_directions = hit_directions[valid_hits]
+            
+            # Calculate surface normals at hit points
+            surface_normals = surface.get_normals_vectorized(hit_points)
+            
+            # Calculate incidence angles and Fresnel reflectance
+            cos_incident = np.abs(np.sum(-hit_directions * surface_normals, axis=1))
+            cos_incident = np.clip(cos_incident, 0, 1)
+            
+            # Calculate Fresnel reflectance for each ray
+            reflectances = self.fresnel_reflectance_vectorized(cos_incident, 1.0, surface.refractive_index)
+            
+            # Calculate absorption fraction for each ray (1 - reflectance)
+            absorption_fractions = 1.0 - reflectances
             
             # Find nearest discretization points for each hit
             if len(hit_points) > 0:
@@ -590,14 +685,14 @@ class VectorizedRayTracer:
                     hit_points[:, np.newaxis, :] - positions[np.newaxis, :, :], axis=2)
                 nearest_indices = np.argmin(distances, axis=1)
                 
-                # Calculate normalized flux: (absorbed power) / (total laser power)
-                for i, power in zip(nearest_indices, hit_powers):
-                    absorbed_power = power * absorption_fraction
+                # Calculate normalized flux using actual absorption fractions
+                for i, power, abs_frac in zip(nearest_indices, hit_powers, absorption_fractions):
+                    absorbed_power = power * abs_frac
                     normalized_flux[i] += absorbed_power / self.laser.total_power
-            
+
             irradiance_by_generation.append(normalized_flux)
             print(f"Generation {batch_idx} on surface {surface.surface_id}: {num_hits} hits, max normalized flux = {np.max(normalized_flux):.6f}")
-        
+
         # Calculate total normalized flux
         total_irradiance = sum(irradiance_by_generation)
         
@@ -624,11 +719,44 @@ class VectorizedRayTracer:
         # Apply additional normalization for display if requested (normalize by max value)
         if normalize and np.max(total_irradiance) > 0:
             max_total = np.max(total_irradiance)
-            irradiance_by_generation = [irr * 100 for irr in irradiance_by_generation]
+            irradiance_by_generation = [irr / max_total for irr in irradiance_by_generation]
+            total_irradiance = total_irradiance / max_total
             print(f"  Applied additional normalization by max value: {max_total:.6f}")
         
         print(f"Surface {surface.surface_id}: Total hits = {total_hits}")
-        print(f"  Absorption fraction: {absorption_fraction:.3f}")
+        if total_hits > 0:
+            # Calculate average absorption fraction for reporting
+            avg_absorption = 0.0
+            total_weighted_absorption = 0.0
+            total_power = 0.0
+            
+            for batch_idx, batch in enumerate(self.all_ray_batches):
+                surface_hits = batch.hit_surface_ids == surface.surface_id
+                if np.any(surface_hits):
+                    hit_points = batch.intersection_points[surface_hits]
+                    hit_powers = batch.powers[surface_hits]
+                    hit_directions = batch.directions[surface_hits]
+                    
+                    valid_hits = ~np.isnan(hit_points).any(axis=1)
+                    if np.any(valid_hits):
+                        hit_points = hit_points[valid_hits]
+                        hit_powers = hit_powers[valid_hits]
+                        hit_directions = hit_directions[valid_hits]
+                        
+                        surface_normals = surface.get_normals_vectorized(hit_points)
+                        cos_incident = np.abs(np.sum(-hit_directions * surface_normals, axis=1))
+                        cos_incident = np.clip(cos_incident, 0, 1)
+                        
+                        reflectances = self.fresnel_reflectance_vectorized(cos_incident, 1.0, surface.refractive_index)
+                        absorption_fractions = 1.0 - reflectances
+                        
+                        total_weighted_absorption += np.sum(absorption_fractions * hit_powers)
+                        total_power += np.sum(hit_powers)
+            
+            if total_power > 0:
+                avg_absorption = total_weighted_absorption / total_power
+            
+            print(f"  Average absorption fraction: {avg_absorption:.3f}")
         print(f"  Shadow length = {shadow_length*1000:.1f}mm, Max extent = {max_extent_position*1000:.1f}mm")
         print(f"  Distance range: {np.min(distances_from_nip)*1000:.1f} to {np.max(distances_from_nip)*1000:.1f}mm")
         print(f"  Normalized flux range: {np.min(total_physical_irradiance):.6f} to {np.max(total_physical_irradiance):.6f}")
@@ -640,8 +768,8 @@ class VectorizedRayTracer:
         """Export normalized flux data to text file with 20 points resolution"""
         
         print(f"Exporting normalized flux data...")
-        print(f"Debug - Substrate dist range: {np.min(substrate_dist):.6f} to {np.max(substrate_dist):.6f}")
-        print(f"Debug - Substrate flux range: {np.min(substrate_total_normalized):.6f} to {np.max(substrate_total_normalized):.6f}")
+        #print(f"Debug - Substrate dist range: {np.min(substrate_dist):.6f} to {np.max(substrate_dist):.6f}")
+        #print(f"Debug - Substrate flux range: {np.min(substrate_total_normalized):.6f} to {np.max(substrate_total_normalized):.6f}")
         
         # Find non-zero flux indices
         substrate_nonzero_indices = np.where(substrate_total_normalized > 0)[0]
@@ -748,6 +876,7 @@ class VectorizedRayTracer:
                 file_handle.write(",\n        " + ", ".join(line_parts))
         file_handle.write("\n")
 
+    
 def run_vectorized_example():
     """Run vectorized example simulation and create plots"""
     
@@ -757,14 +886,15 @@ def run_vectorized_example():
     # Define system parameters
     laser = VectorizedLaser(
         source_length=30e-3,           # 10 mm
-        source_center=np.array([-95e-3, 30e-3]),  # 95 mm left, 30 mm up
+        source_center=np.array([-300e-3, 97e-3]),  # 95 mm left, 30 mm up
         source_angle=20.0,             # 20 degrees
-        num_rays=5000,                 # 5000 rays for high resolution
+        num_rays=10000,                 # 5000 rays for high resolution
         total_power=1000.0             # 1000 W
     )
     
-    roller = VectorizedRoller(radius=35e-3, refractive_index=1.5)        # 35 mm radius
-    substrate = VectorizedSubstrate(length=100e-3, refractive_index=1.5) # 100 mm length
+    roller = VectorizedRoller(radius=35e-3, refractive_index=1.8)        # 35 mm radius
+    #substrate = VectorizedSubstrate(length=100e-3, refractive_index=1.8) # 100 mm length
+    substrate = VectorizedCurvedSubstrate(radius=200e-3, refractive_index=1.8) # 35 mm radius, curved substrate
     
     # Create vectorized ray tracer
     tracer = VectorizedRayTracer(laser, roller, substrate, max_reflections=6, min_power_threshold=0.001)
@@ -784,9 +914,9 @@ def run_vectorized_example():
     # Calculate irradiance by generation
     print("Calculating irradiance distributions by generation...")
     substrate_dist, substrate_irradiance_gen, substrate_shadow, substrate_max_extent, substrate_total_physical = tracer.calculate_irradiance_by_generation_vectorized(
-        substrate, 200, normalize=use_normalized_flux)
+        substrate, 1000, normalize=use_normalized_flux)
     roller_dist, roller_irradiance_gen, roller_shadow, roller_max_extent, roller_total_physical = tracer.calculate_irradiance_by_generation_vectorized(
-        roller, 200, normalize=use_normalized_flux)
+        roller, 100, normalize=use_normalized_flux)
  
     # Create plots - main plot on top, irradiance plots below
     fig = plt.figure(figsize=(15, 12))
@@ -1014,4 +1144,5 @@ def run_vectorized_example():
 
 
 if __name__ == "__main__":
+
     run_vectorized_example()
