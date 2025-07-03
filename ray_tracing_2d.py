@@ -356,29 +356,26 @@ class VectorizedRayTracer:
         # Storage for all ray generations
         self.all_ray_batches = []
         
-    def fresnel_reflectance_vectorized(self, cos_incident: np.ndarray, n1: float, n2: float) -> np.ndarray:
-        """Vectorized Fresnel reflectance calculation for s-polarized light"""
-        sin_incident = np.sqrt(np.maximum(0, 1 - cos_incident**2))
+    def fresnel_reflectance_vectorized(self, theta: np.ndarray, n1: float, n2: float) -> np.ndarray:
+        """Calculate Fresnel reflection coefficient for unpolarized light"""
+        theta = np.asarray(theta)
+        result = np.zeros_like(theta, dtype=float)
         
-        # Snell's law
-        sin_transmitted = (n1 / n2) * sin_incident
+        # Handle total internal reflection
+        tir_mask = n1/n2 * np.sin(theta) >= 1
+        result[tir_mask] = 1.0
         
-        # Total internal reflection
-        tir_mask = sin_transmitted > 1.0
-        cos_transmitted = np.sqrt(np.maximum(0, 1 - np.minimum(sin_transmitted**2, 1.0)))
+        # Handle regular reflection
+        non_tir_mask = ~tir_mask
+        if np.any(non_tir_mask):
+            theta_t = np.arcsin((n1/n2) * np.sin(theta[non_tir_mask]))
+            r_s = ((n1*np.cos(theta[non_tir_mask]) - n2*np.cos(theta_t)) / 
+                  (n1*np.cos(theta[non_tir_mask]) + n2*np.cos(theta_t)))**2
+            r_p = ((n1*np.cos(theta_t) - n2*np.cos(theta[non_tir_mask])) / 
+                  (n1*np.cos(theta_t) + n2*np.cos(theta[non_tir_mask])))**2
+            result[non_tir_mask] = (r_s + r_p) / 2
         
-        # Fresnel equations for s-polarization
-        numerator = n1 * cos_incident - n2 * cos_transmitted
-        denominator = n1 * cos_incident + n2 * cos_transmitted
-        
-        # Avoid division by zero
-        denominator = np.where(np.abs(denominator) < 1e-15, 1e-15, denominator)
-        r_s = (numerator / denominator)**2
-        
-        # Set total internal reflection
-        r_s = np.where(tir_mask, 1.0, r_s)
-        
-        return np.clip(r_s, 0, 1)
+        return result
     
     def find_nearest_intersections_vectorized(self, ray_batch: VectorizedRayBatch) -> None:
         """Find nearest surface intersection for all active rays"""
@@ -464,13 +461,15 @@ class VectorizedRayTracer:
         reflectances = np.zeros(num_hits)
         
         if np.any(roller_hits):
+            incident_angles = np.arccos(cos_incident[roller_hits])
             roller_reflectance = self.fresnel_reflectance_vectorized(
-                cos_incident[roller_hits], 1.0, self.roller.refractive_index)
+                incident_angles, 1.0, self.roller.refractive_index)
             reflectances[roller_hits] = roller_reflectance
             
         if np.any(substrate_hits):
+            incident_angles = np.arccos(cos_incident[substrate_hits])
             substrate_reflectance = self.fresnel_reflectance_vectorized(
-                cos_incident[substrate_hits], 1.0, self.substrate.refractive_index)
+                incident_angles, 1.0, self.substrate.refractive_index)
             reflectances[substrate_hits] = substrate_reflectance
         
         # Compute reflected powers
@@ -673,8 +672,9 @@ class VectorizedRayTracer:
             cos_incident = np.abs(np.sum(-hit_directions * surface_normals, axis=1))
             cos_incident = np.clip(cos_incident, 0, 1)
             
-            # Calculate Fresnel reflectance for each ray
-            reflectances = self.fresnel_reflectance_vectorized(cos_incident, 1.0, surface.refractive_index)
+            # Calculate incident angles and Fresnel reflectance for each ray
+            incident_angles = np.arccos(cos_incident)
+            reflectances = self.fresnel_reflectance_vectorized(incident_angles, 1.0, surface.refractive_index)
             
             # Calculate absorption fraction for each ray (1 - reflectance)
             absorption_fractions = 1.0 - reflectances
@@ -747,7 +747,8 @@ class VectorizedRayTracer:
                         cos_incident = np.abs(np.sum(-hit_directions * surface_normals, axis=1))
                         cos_incident = np.clip(cos_incident, 0, 1)
                         
-                        reflectances = self.fresnel_reflectance_vectorized(cos_incident, 1.0, surface.refractive_index)
+                        incident_angles = np.arccos(cos_incident)
+                        reflectances = self.fresnel_reflectance_vectorized(incident_angles, 1.0, surface.refractive_index)
                         absorption_fractions = 1.0 - reflectances
                         
                         total_weighted_absorption += np.sum(absorption_fractions * hit_powers)
