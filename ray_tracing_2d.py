@@ -605,7 +605,7 @@ class VectorizedRayTracer:
         return ray_segments
     
     def calculate_irradiance_by_generation_vectorized(self, surface: VectorizedSurface, 
-                                            num_points: int = 100, normalize: bool = False) -> Tuple[np.ndarray, List[np.ndarray], float, float, np.ndarray]:
+                                            num_points: int = 100) -> Tuple[np.ndarray, List[np.ndarray], float, float, np.ndarray]:
         """Vectorized irradiance calculation on surface, separated by ray generation"""
         if isinstance(surface, VectorizedSubstrate):
             # For substrate (horizontal line) - distance from nip point (0,0)
@@ -640,14 +640,14 @@ class VectorizedRayTracer:
         
         # Process each ray batch (generation) separately
         for batch_idx, batch in enumerate(self.all_ray_batches):
-            normalized_flux = np.zeros(num_points)
+            physical_flux = np.zeros(num_points)
             
             # Find rays that hit the target surface
             surface_hits = batch.hit_surface_ids == surface.surface_id
             num_hits = np.sum(surface_hits)
             
             if num_hits == 0:
-                irradiance_by_generation.append(normalized_flux)
+                irradiance_by_generation.append(physical_flux)
                 continue
                 
             total_hits += num_hits
@@ -658,7 +658,7 @@ class VectorizedRayTracer:
             # Remove any NaN intersection points
             valid_hits = ~np.isnan(hit_points).any(axis=1)
             if not np.any(valid_hits):
-                irradiance_by_generation.append(normalized_flux)
+                irradiance_by_generation.append(physical_flux)
                 continue
                 
             hit_points = hit_points[valid_hits]
@@ -685,15 +685,15 @@ class VectorizedRayTracer:
                     hit_points[:, np.newaxis, :] - positions[np.newaxis, :, :], axis=2)
                 nearest_indices = np.argmin(distances, axis=1)
                 
-                # Calculate normalized flux using actual absorption fractions
+                # Calculate absorbed power at each point
                 for i, power, abs_frac in zip(nearest_indices, hit_powers, absorption_fractions):
                     absorbed_power = power * abs_frac
-                    normalized_flux[i] += absorbed_power / self.laser.total_power
+                    physical_flux[i] += absorbed_power
 
-            irradiance_by_generation.append(normalized_flux)
-            print(f"Generation {batch_idx} on surface {surface.surface_id}: {num_hits} hits, max normalized flux = {np.max(normalized_flux):.6f}")
+            irradiance_by_generation.append(physical_flux)
+            print(f"Generation {batch_idx} on surface {surface.surface_id}: {num_hits} hits, max flux = {np.max(physical_flux):.3f} W")
 
-        # Calculate total normalized flux
+        # Calculate total physical flux
         total_irradiance = sum(irradiance_by_generation)
         
         # Calculate shadow length (distance to first non-zero flux from nip point)
@@ -712,16 +712,6 @@ class VectorizedRayTracer:
             # Find maximum distance among points with significant flux
             significant_distances = distances_from_nip[significant_flux_mask]
             max_extent_position = np.max(significant_distances)
-        
-        # Store the total normalized irradiance (this is our "physical" output for export)
-        total_physical_irradiance = total_irradiance.copy()
-        
-        # Apply additional normalization for display if requested (normalize by max value)
-        if normalize and np.max(total_irradiance) > 0:
-            max_total = np.max(total_irradiance)
-            irradiance_by_generation = [irr / max_total for irr in irradiance_by_generation]
-            total_irradiance = total_irradiance / max_total
-            print(f"  Applied additional normalization by max value: {max_total:.6f}")
         
         print(f"Surface {surface.surface_id}: Total hits = {total_hits}")
         if total_hits > 0:
@@ -760,26 +750,24 @@ class VectorizedRayTracer:
             print(f"  Average absorption fraction: {avg_absorption:.3f}")
         print(f"  Shadow length = {shadow_length*1000:.1f}mm, Max extent = {max_extent_position*1000:.1f}mm")
         print(f"  Distance range: {np.min(distances_from_nip)*1000:.1f} to {np.max(distances_from_nip)*1000:.1f}mm")
-        print(f"  Normalized flux range: {np.min(total_physical_irradiance):.6f} to {np.max(total_physical_irradiance):.6f}")
+        print(f"  Flux range: {np.min(total_irradiance):.3f} to {np.max(total_irradiance):.3f} W")
         
-        return distances_from_nip, irradiance_by_generation, shadow_length, max_extent_position, total_physical_irradiance 
+        return distances_from_nip, irradiance_by_generation, shadow_length, max_extent_position, total_irradiance 
         
-    def export_flux_data(self, substrate_dist, substrate_total_normalized, substrate_extent,
-                    roller_dist, roller_total_normalized, roller_extent, filename="flux_data.txt"):
-        """Export normalized flux data to text file with 20 points resolution"""
+    def export_flux_data(self, substrate_dist, substrate_total_flux, substrate_extent,
+                    roller_dist, roller_total_flux, roller_extent, filename="flux_data.txt"):
+        """Export physical flux data to text file with 20 points resolution"""
         
-        print(f"Exporting normalized flux data...")
-        #print(f"Debug - Substrate dist range: {np.min(substrate_dist):.6f} to {np.max(substrate_dist):.6f}")
-        #print(f"Debug - Substrate flux range: {np.min(substrate_total_normalized):.6f} to {np.max(substrate_total_normalized):.6f}")
+        print(f"Exporting physical flux data...")
         
         # Find non-zero flux indices
-        substrate_nonzero_indices = np.where(substrate_total_normalized > 0)[0]
-        roller_nonzero_indices = np.where(roller_total_normalized > 0)[0]
+        substrate_nonzero_indices = np.where(substrate_total_flux > 0)[0]
+        roller_nonzero_indices = np.where(roller_total_flux > 0)[0]
         
         # Extract and sort substrate data for interpolation
         if len(substrate_nonzero_indices) > 0:
             substrate_flux_distances = substrate_dist[substrate_nonzero_indices]
-            substrate_flux_values = substrate_total_normalized[substrate_nonzero_indices]
+            substrate_flux_values = substrate_total_flux[substrate_nonzero_indices]
             
             # Sort by distance for proper interpolation
             substrate_sort_indices = np.argsort(substrate_flux_distances)
@@ -797,7 +785,7 @@ class VectorizedRayTracer:
         # Extract and sort roller data for interpolation
         if len(roller_nonzero_indices) > 0:
             roller_flux_distances = roller_dist[roller_nonzero_indices]
-            roller_flux_values = roller_total_normalized[roller_nonzero_indices]
+            roller_flux_values = roller_total_flux[roller_nonzero_indices]
             
             # Sort by distance for proper interpolation
             roller_sort_indices = np.argsort(roller_flux_distances)
@@ -823,8 +811,8 @@ class VectorizedRayTracer:
         substrate_flux = np.interp(substrate_positions, substrate_sorted_dist, substrate_sorted_flux)
         roller_flux = np.interp(roller_positions, roller_sorted_dist, roller_sorted_flux)
         
-        print(f"Debug - Interpolated substrate flux range: {np.min(substrate_flux):.6f} to {np.max(substrate_flux):.6f}")
-        print(f"Debug - Interpolated roller flux range: {np.min(roller_flux):.6f} to {np.max(roller_flux):.6f}")
+        print(f"Debug - Interpolated substrate flux range: {np.min(substrate_flux):.3f} to {np.max(substrate_flux):.3f} W")
+        print(f"Debug - Interpolated roller flux range: {np.min(roller_flux):.3f} to {np.max(roller_flux):.3f} W")
         
         # Convert substrate positions to negative values (distance from nip point towards substrate)
         substrate_positions_negative = -substrate_positions
@@ -838,31 +826,31 @@ class VectorizedRayTracer:
         self._write_flux_file(filename, substrate_positions_negative, substrate_flux, 
                             roller_positions_negative, roller_flux)
         
-        print(f"Normalized flux data exported to {filename}")
-        print(f"  Substrate max normalized flux: {np.max(substrate_flux):.6f}")
-        print(f"  Roller max normalized flux: {np.max(roller_flux):.6f}")
+        print(f"Physical flux data exported to {filename}")
+        print(f"  Substrate max flux: {np.max(substrate_flux):.3f} W")
+        print(f"  Roller max flux: {np.max(roller_flux):.3f} W")
 
     def _write_flux_file(self, filename, substrate_positions_negative, substrate_flux,
                         roller_positions, roller_flux):
         """Write flux data to file with proper formatting"""
         with open(filename, 'w') as f:
-            f.write("# Normalized Heat Flux Data\n")
-            f.write("# Values represent absorption efficiency (0-1 scale)\n")
+            f.write("# Physical Heat Flux Data\n")
+            f.write("# Values represent absorbed power (W)\n")
             f.write("#\n")
             f.write("# SUBSTRATE DATA\n")
             f.write("# Positions (m):\n")
             
             self._write_data_section(f, substrate_positions_negative, ".3f")
-            f.write("# Flux values:\n")
-            self._write_data_section(f, substrate_flux, ".6f")
+            f.write("# Flux values (W):\n")
+            self._write_data_section(f, substrate_flux, ".3f")
             
             f.write("#\n")
             f.write("# INCOMING TAPE DATA\n")
             f.write("# Positions (m):\n")
             
             self._write_data_section(f, roller_positions, ".3f")
-            f.write("# Flux values:\n")
-            self._write_data_section(f, roller_flux, ".6f")
+            f.write("# Flux values (W):\n")
+            self._write_data_section(f, roller_flux, ".3f")
 
     def _write_data_section(self, file_handle, data_array, format_spec):
         """Write formatted data array to file with line breaks"""
@@ -880,9 +868,6 @@ class VectorizedRayTracer:
     
 def run_vectorized_example():
     """Run vectorized example simulation and create plots"""
-    
-    # Configuration
-    use_normalized_flux = True  # Set to False for physical flux (W/m²), True for normalized
     
     # Define system parameters
     laser = VectorizedLaser(
@@ -915,9 +900,9 @@ def run_vectorized_example():
     # Calculate irradiance by generation
     print("Calculating irradiance distributions by generation...")
     substrate_dist, substrate_irradiance_gen, substrate_shadow, substrate_max_extent, substrate_total_physical = tracer.calculate_irradiance_by_generation_vectorized(
-        substrate, 1000, normalize=use_normalized_flux)
+        substrate, 1000)
     roller_dist, roller_irradiance_gen, roller_shadow, roller_max_extent, roller_total_physical = tracer.calculate_irradiance_by_generation_vectorized(
-        roller, 100, normalize=use_normalized_flux)
+        roller, 100)
  
     # Create plots - main plot on top, irradiance plots below
     fig = plt.figure(figsize=(15, 12))
@@ -985,10 +970,9 @@ def run_vectorized_example():
     ax1.plot(0, 0, 'ko', markersize=8, label='Nip Point')
     
     # Add text with ray count, power, and shadow lengths
-    flux_type = "Normalized" if use_normalized_flux else "Physical"
     text_str = (f'Rays: {laser.num_rays:,}\nPower: {laser.total_power:.0f} W\n'
                 f'Reflections: {len(ray_batches)-1}\n'
-                f'Flux: {flux_type}\n'
+                f'Flux: Physical (W)\n'
                 f'Substrate Shadow: {substrate_shadow*1000:.1f} mm\n'
                 f'Incoming Tape Shadow: {roller_shadow*1000:.1f} mm')
     ax1.text(0.02, 0.98, text_str, transform=ax1.transAxes, fontsize=10, 
@@ -1021,22 +1005,19 @@ def run_vectorized_example():
                 label = f'Reflection {gen_idx}'
                 color = generation_colors[min(gen_idx, len(generation_colors)-1)]
                 
-            scale_factor = 1 if use_normalized_flux else 1000
-            ax2.plot(substrate_dist * 1000, irradiance / scale_factor, 
+            ax2.plot(substrate_dist * 1000, irradiance, 
                     color=color, linewidth=2, label=label)
             total_substrate += irradiance
     
     # Plot total with black solid line
-    scale_factor = 1 if use_normalized_flux else 1000
-    ax2.plot(substrate_dist * 1000, total_substrate / scale_factor, 'k-', linewidth=2, label='Total')
+    ax2.plot(substrate_dist * 1000, total_substrate, 'k-', linewidth=2, label='Total')
     
     # Set x-axis limit to max extent position + 5mm
     substrate_xlim = (substrate_max_extent + 5e-3) * 1000  # Convert to mm
     ax2.set_xlim(0, substrate_xlim)
     
     ax2.set_xlabel('Distance from Nip Point (mm)')
-    y_label = 'Normalized Irradiance' if use_normalized_flux else 'Irradiance (kW/m²)'
-    ax2.set_ylabel(y_label)
+    ax2.set_ylabel('Absorbed Power (W)')
     ax2.set_title('Substrate Irradiance by Generation')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
@@ -1059,22 +1040,19 @@ def run_vectorized_example():
                 label = f'Reflection {gen_idx}'
                 color = generation_colors[min(gen_idx, len(generation_colors)-1)]
                 
-            scale_factor = 1 if use_normalized_flux else 1000
-            ax3.plot(roller_dist * 1000, irradiance / scale_factor, 
+            ax3.plot(roller_dist * 1000, irradiance, 
                     color=color, linewidth=2, label=label)
             total_roller += irradiance
     
     # Plot total with black solid line
-    scale_factor = 1 if use_normalized_flux else 1000
-    ax3.plot(roller_dist * 1000, total_roller / scale_factor, 'k-', linewidth=2, label='Total')
+    ax3.plot(roller_dist * 1000, total_roller, 'k-', linewidth=2, label='Total')
     
     # Set x-axis limit to max extent position + 5mm
     roller_xlim = (roller_max_extent + 5e-3) * 1000  # Convert to mm
     ax3.set_xlim(0, roller_xlim)
     
     ax3.set_xlabel('Arc Distance from Nip Point (mm)')
-    y_label = 'Normalized Irradiance' if use_normalized_flux else 'Irradiance (kW/m²)'
-    ax3.set_ylabel(y_label)
+    ax3.set_ylabel('Absorbed Power (W)')
     ax3.set_title('Incoming Tape Irradiance by Generation')
     ax3.legend()
     ax3.grid(True, alpha=0.3)
@@ -1091,7 +1069,7 @@ def run_vectorized_example():
     print(f"Total laser power: {laser.total_power:.1f} W")
     print(f"Power per ray: {laser.power_per_ray:.3f} W")
     print(f"Single ray traced through {len(single_ray_path)} reflections")
-    print(f"Flux type: {'Normalized' if use_normalized_flux else 'Physical (kW/m²)'}")
+    print(f"Flux type: Physical (W)")
     print(f"Shadow lengths: Substrate = {substrate_shadow*1000:.1f}mm, Incoming Tape = {roller_shadow*1000:.1f}mm")
     print(f"Max extent positions: Substrate = {substrate_max_extent*1000:.1f}mm, Incoming Tape = {roller_max_extent*1000:.1f}mm")
     
@@ -1102,16 +1080,10 @@ def run_vectorized_example():
         max_irr = np.max(irradiance)
         if max_irr > 0:
             gen_name = 'Direct' if gen_idx == 0 else f'Reflection {gen_idx}'
-            if use_normalized_flux:
-                print(f"  {gen_name}: Max = {max_irr:.4f}")
-            else:
-                total_power = np.sum(irradiance) * (substrate.length / len(irradiance))
-                print(f"  {gen_name}: Max = {max_irr/1000:.1f} kW/m², Total = {total_power:.1f} W")
+            total_power = np.sum(irradiance)
+            print(f"  {gen_name}: Max = {max_irr:.1f} W, Total = {total_power:.1f} W")
     
-    if use_normalized_flux:
-        print(f"  Total Max = {np.max(substrate_total_irr):.4f}")
-    else:
-        print(f"  Total Max = {np.max(substrate_total_physical)/1000:.1f} kW/m²")
+    print(f"  Total Max = {np.max(substrate_total_irr):.1f} W")
     
     print(f"\nIncoming Tape Irradiance by Generation:")
     roller_total_irr = sum(roller_irradiance_gen)
@@ -1119,16 +1091,10 @@ def run_vectorized_example():
         max_irr = np.max(irradiance)
         if max_irr > 0:
             gen_name = 'Direct' if gen_idx == 0 else f'Reflection {gen_idx}'
-            if use_normalized_flux:
-                print(f"  {gen_name}: Max = {max_irr:.4f}")
-            else:
-                total_power = np.sum(irradiance) * (np.pi * roller.radius / 2 / len(irradiance))
-                print(f"  {gen_name}: Max = {max_irr/1000:.1f} kW/m², Total = {total_power:.1f} W")
+            total_power = np.sum(irradiance)
+            print(f"  {gen_name}: Max = {max_irr:.1f} W, Total = {total_power:.1f} W")
     
-    if use_normalized_flux:
-        print(f"  Total Max = {np.max(roller_total_irr):.4f}")
-    else:
-        print(f"  Total Max = {np.max(roller_total_physical)/1000:.1f} kW/m²")
+    print(f"  Total Max = {np.max(roller_total_irr):.1f} W")
     
     # Power conservation check
     total_initial_power = np.sum(ray_batches[0].powers)
@@ -1136,11 +1102,11 @@ def run_vectorized_example():
     print(f"Power conservation: Initial={total_initial_power:.1f}W, "
           f"Reflected={total_final_power:.1f}W")
     
-    # Export flux data to text file (always use normalized data for export)
+    # Export flux data to text file
     tracer.export_flux_data(
         substrate_dist, total_substrate, substrate_max_extent,
         roller_dist, total_roller, roller_max_extent,
-        "normalized_flux_data.txt"
+        "flux_data.txt"
     )
 
 
