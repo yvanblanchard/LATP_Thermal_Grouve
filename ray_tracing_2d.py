@@ -341,17 +341,53 @@ class VectorizedLaser:
 
 
 class VectorizedRayTracer:
-    """High-performance vectorized ray tracing engine"""
+    """
+    High-performance vectorized ray tracing engine
+    
+    POWER INDEPENDENCE FIX:
+    ======================
+    This implementation uses a RELATIVE power threshold instead of absolute
+    to ensure the distribution shape remains constant regardless of laser power.
+    
+    PROBLEM with absolute threshold:
+    - min_power_threshold = 0.01 W (fixed)
+    - 1000W case: power_per_ray = 0.1W → reflected = 0.01W → above threshold ✅
+    - 1W case: power_per_ray = 0.0001W → reflected = 0.00001W → below threshold ❌
+    - Result: Low power cases lose reflections → different distribution shape
+    
+    SOLUTION with relative threshold:
+    - min_power_threshold = total_power × threshold_fraction
+    - 1000W case: threshold = 1000 × 1e-6 = 0.001W
+    - 1W case: threshold = 1 × 1e-6 = 0.000001W
+    - Result: Same relative cutoff → same distribution shape ✅
+    
+    PHYSICS JUSTIFICATION:
+    - Real physics: reflection behavior depends on material properties, not power
+    - Fresnel coefficients are power-independent
+    - Only total absorbed energy should scale with power
+    - Distribution shape should be power-independent
+    """
     
     def __init__(self, laser: VectorizedLaser, roller: VectorizedRoller, 
                  substrate: VectorizedSubstrate, max_reflections: int = 4,
-                 min_power_threshold: float = 0.01):
+                 min_power_threshold_fraction: float = 1e-5):
+        """
+        Initialize ray tracer with power-independent threshold
+        
+        Args:
+            laser: Laser source configuration
+            roller: Roller surface geometry
+            substrate: Substrate surface geometry  
+            max_reflections: Maximum number of reflections to trace
+            min_power_threshold_fraction: Relative threshold (e.g., 1e-5 means 0.001% of total power)
+        """
         self.laser = laser
         self.roller = roller
         self.substrate = substrate
         self.surfaces = [roller, substrate]
         self.max_reflections = max_reflections
-        self.min_power_threshold = min_power_threshold
+        # Calculate absolute threshold based on laser power
+        self.min_power_threshold = laser.total_power * min_power_threshold_fraction
         
         # Storage for all ray generations
         self.all_ray_batches = []
@@ -865,25 +901,82 @@ class VectorizedRayTracer:
                 file_handle.write(",\n        " + ", ".join(line_parts))
         file_handle.write("\n")
 
-    
+    def verify_power_independence(self, test_power: float) -> bool:
+        """
+        Verify that the distribution shape is independent of laser power.
+        
+        Args:
+            test_power: Power level to test (W)
+            
+        Returns:
+            True if the normalized distributions match within tolerance
+        """
+        # Create a test laser with different power
+        test_laser = VectorizedLaser(
+            source_length=self.laser.source_length,
+            source_center=self.laser.source_center,
+            source_angle=np.degrees(self.laser.source_angle),
+            num_rays=self.laser.num_rays,
+            total_power=test_power
+        )
+        
+        # Create test tracer with same relative threshold
+        test_tracer = VectorizedRayTracer(
+            test_laser, self.roller, self.substrate, 
+            self.max_reflections, 
+            min_power_threshold_fraction=self.min_power_threshold / self.laser.total_power
+        )
+        
+        # Trace rays for both cases
+        original_batches = self.trace_all_rays_vectorized()
+        test_batches = test_tracer.trace_all_rays_vectorized()
+        
+        # Calculate normalized distributions
+        _, _, _, _, original_flux = self.calculate_irradiance_by_generation_vectorized(self.substrate, 200)
+        _, _, _, _, test_flux = test_tracer.calculate_irradiance_by_generation_vectorized(self.substrate, 200)
+        
+        # Normalize by total power
+        original_normalized = original_flux / self.laser.total_power
+        test_normalized = test_flux / test_power
+        
+        # Check if shapes match (within 5% tolerance)
+        max_diff = np.max(np.abs(original_normalized - test_normalized))
+        max_original = np.max(original_normalized)
+        relative_error = max_diff / max_original if max_original > 0 else 0
+        
+        print(f"Power independence verification:")
+        print(f"  Original power: {self.laser.total_power} W")
+        print(f"  Test power: {test_power} W")
+        print(f"  Max relative error: {relative_error:.2%}")
+        print(f"  Threshold: {relative_error < 0.05}")
+        
+        return relative_error < 0.05
+        
 def run_vectorized_example():
     """Run vectorized example simulation and create plots"""
     
     # Define system parameters
     laser = VectorizedLaser(
-        source_length=30e-3,           # 10 mm
-        source_center=np.array([-300e-3, 97e-3]),  # 95 mm left, 30 mm up
+        source_length=30e-3,           # 30 mm
+        source_center=np.array([-300e-3, 97e-3]),  # 300 mm left, 97 mm up
         source_angle=20.0,             # 20 degrees
-        num_rays=10000,                 # 5000 rays for high resolution
-        total_power=1000.0             # 1000 W
+        num_rays=10000,                # 10000 rays for high resolution
+        total_power=1.0             # 1000 W
     )
     
     roller = VectorizedRoller(radius=35e-3, refractive_index=1.8)        # 35 mm radius
     #substrate = VectorizedSubstrate(length=100e-3, refractive_index=1.8) # 100 mm length
-    substrate = VectorizedCurvedSubstrate(radius=200e-3, refractive_index=1.8) # 35 mm radius, curved substrate
+    substrate = VectorizedCurvedSubstrate(radius=200e-3, refractive_index=1.8) # 200 mm radius, curved substrate
     
-    # Create vectorized ray tracer
-    tracer = VectorizedRayTracer(laser, roller, substrate, max_reflections=6, min_power_threshold=0.001)
+    # Create vectorized ray tracer with RELATIVE threshold for power independence
+    tracer = VectorizedRayTracer(laser, roller, substrate, max_reflections=6, min_power_threshold_fraction=1e-6)
+    
+    # Print threshold information
+    print(f"Laser power: {laser.total_power} W")
+    print(f"Power per ray: {laser.power_per_ray:.6f} W")
+    print(f"Relative threshold fraction: 1e-6")
+    print(f"Absolute threshold: {tracer.min_power_threshold:.2e} W")
+    print(f"This ensures same distribution shape regardless of total power!")
     
     # Trace all rays with vectorization
     import time
@@ -1109,7 +1202,7 @@ def run_vectorized_example():
         "flux_data.txt"
     )
 
-
 if __name__ == "__main__":
 
+    # Run main example with power-independent ray tracing
     run_vectorized_example()
