@@ -12,13 +12,15 @@ class VectorizedRayBatch:
     """
     
     def __init__(self, origins: np.ndarray, directions: np.ndarray, powers: np.ndarray, 
-                 generations: np.ndarray = None, active_mask: np.ndarray = None):
+                 generations: np.ndarray = None, active_mask: np.ndarray = None,
+                 original_ray_indices: np.ndarray = None):
         """
         origins: (N, 2) array of ray origin points [y, z]
         directions: (N, 2) array of ray direction vectors [dy, dz]
         powers: (N,) array of ray powers
         generations: (N,) array of reflection generation numbers
         active_mask: (N,) boolean array indicating which rays are still active
+        original_ray_indices: (N,) array tracking which original ray each ray came from
         """
         self.origins = origins.copy()
         self.directions = directions.copy()
@@ -34,6 +36,11 @@ class VectorizedRayBatch:
             self.active_mask = np.ones(self.num_rays, dtype=bool)
         else:
             self.active_mask = active_mask.copy()
+            
+        if original_ray_indices is None:
+            self.original_ray_indices = np.arange(self.num_rays)
+        else:
+            self.original_ray_indices = original_ray_indices.copy()
             
         # Normalize directions
         norms = np.linalg.norm(self.directions, axis=1)
@@ -337,7 +344,8 @@ class VectorizedLaser:
         # All rays have same power
         powers = np.full(self.num_rays, self.power_per_ray)
         
-        return VectorizedRayBatch(origins, directions, powers)
+        return VectorizedRayBatch(origins, directions, powers, 
+                                original_ray_indices=np.arange(self.num_rays))
 
 
 class VectorizedRayTracer:
@@ -546,7 +554,8 @@ class VectorizedRayTracer:
             directions=new_directions,
             powers=reflection_powers,
             generations=new_generations,
-            active_mask=new_active_mask
+            active_mask=new_active_mask,
+            original_ray_indices=ray_batch.original_ray_indices[reflection_indices]
         )
         
         print(f"  Created {len(new_origins)} reflected rays with powers from {np.min(reflection_powers):.3f} to {np.max(reflection_powers):.3f} W")
@@ -619,39 +628,37 @@ class VectorizedRayTracer:
             ray_index = len(self.all_ray_batches[0].origins) // 2  # Middle ray
             
         ray_segments = []
+        current_intersection = None
         
-        # Start with the initial ray
-        if ray_index < len(self.all_ray_batches[0].origins):
-            current_batch = self.all_ray_batches[0]
-            ray_origin = current_batch.origins[ray_index]
-            
-            # Check if this ray hit something
-            if current_batch.hit_surface_ids[ray_index] >= 0:
-                ray_intersection = current_batch.intersection_points[ray_index]
-                ray_segments.append((ray_origin, ray_intersection))
+        # Trace through all batches to build complete ray path
+        for batch_idx, batch in enumerate(self.all_ray_batches):
+            # Find ray with matching original index in this batch
+            if batch_idx == 0:
+                # First batch uses direct ray index
+                if ray_index < batch.num_rays and batch.hit_surface_ids[ray_index] >= 0:
+                    ray_origin = batch.origins[ray_index]
+                    ray_intersection = batch.intersection_points[ray_index]
+                    ray_segments.append((ray_origin, ray_intersection))
+                    current_intersection = ray_intersection
+                else:
+                    break  # Ray didn't hit anything
+            else:
+                # Subsequent batches: find ray with same original index
+                matching_rays = batch.original_ray_indices == ray_index
                 
-                # Follow reflections by matching intersection points
-                current_intersection = ray_intersection
-                
-                for batch_idx in range(1, len(self.all_ray_batches)):
-                    batch = self.all_ray_batches[batch_idx]
+                if np.any(matching_rays):
+                    matching_idx = np.where(matching_rays)[0][0]
                     
-                    # Find ray in this batch that started near the previous intersection
-                    distances_to_intersection = np.linalg.norm(
-                        batch.origins - current_intersection[np.newaxis, :], axis=1)
-                    
-                    closest_ray_idx = np.argmin(distances_to_intersection)
-                    
-                    # Check if this is actually the same ray (within tolerance)
-                    if distances_to_intersection[closest_ray_idx] < 1e-8:
-                        if batch.hit_surface_ids[closest_ray_idx] >= 0:
-                            new_intersection = batch.intersection_points[closest_ray_idx]
-                            ray_segments.append((current_intersection, new_intersection))
-                            current_intersection = new_intersection
-                        else:
-                            break  # Ray didn't hit anything, end tracing
+                    if batch.hit_surface_ids[matching_idx] >= 0:
+                        new_intersection = batch.intersection_points[matching_idx]
+                        ray_segments.append((current_intersection, new_intersection))
+                        current_intersection = new_intersection
                     else:
-                        break  # Couldn't find matching reflected ray
+                        # Ray exists but didn't hit anything - end tracing
+                        break
+                else:
+                    # No matching ray found - ray was absorbed or below threshold
+                    break
         
         return ray_segments
     
@@ -956,56 +963,6 @@ class VectorizedRayTracer:
                 file_handle.write(",\n        " + ", ".join(line_parts))
         file_handle.write("\n")
 
-    def verify_power_independence(self, test_power: float) -> bool:
-        """
-        Verify that the distribution shape is independent of laser power.
-        
-        Args:
-            test_power: Power level to test (W)
-            
-        Returns:
-            True if the normalized distributions match within tolerance
-        """
-        # Create a test laser with different power
-        test_laser = VectorizedLaser(
-            source_length=self.laser.source_length,
-            source_center=self.laser.source_center,
-            source_angle=np.degrees(self.laser.source_angle),
-            num_rays=self.laser.num_rays,
-            total_power=test_power
-        )
-        
-        # Create test tracer with same relative threshold
-        test_tracer = VectorizedRayTracer(
-            test_laser, self.roller, self.substrate, 
-            self.max_reflections, 
-            min_power_threshold_fraction=self.min_power_threshold / self.laser.total_power
-        )
-        
-        # Trace rays for both cases
-        original_batches = self.trace_all_rays_vectorized()
-        test_batches = test_tracer.trace_all_rays_vectorized()
-        
-        # Calculate normalized distributions
-        _, _, _, _, original_flux = self.calculate_irradiance_by_generation_vectorized(self.substrate, 200)
-        _, _, _, _, test_flux = test_tracer.calculate_irradiance_by_generation_vectorized(self.substrate, 200)
-        
-        # Normalize by total power
-        original_normalized = original_flux / self.laser.total_power
-        test_normalized = test_flux / test_power
-        
-        # Check if shapes match (within 5% tolerance)
-        max_diff = np.max(np.abs(original_normalized - test_normalized))
-        max_original = np.max(original_normalized)
-        relative_error = max_diff / max_original if max_original > 0 else 0
-        
-        print(f"Power independence verification:")
-        print(f"  Original power: {self.laser.total_power} W")
-        print(f"  Test power: {test_power} W")
-        print(f"  Max relative error: {relative_error:.2%}")
-        print(f"  Threshold: {relative_error < 0.05}")
-        
-        return relative_error < 0.05
         
 def run_vectorized_example():
     """Run vectorized example simulation and create plots"""
@@ -1024,7 +981,9 @@ def run_vectorized_example():
     substrate = VectorizedCurvedSubstrate(radius=200e-3, refractive_index=1.8) # 200 mm radius, curved substrate
     
     # Create vectorized ray tracer with RELATIVE threshold for power independence
-    tracer = VectorizedRayTracer(laser, roller, substrate, max_reflections=3, min_power_threshold_fraction=1e-6)
+    tracer = VectorizedRayTracer(laser, roller, substrate, 
+                                 max_reflections=3, 
+                                 min_power_threshold_fraction=1e-10)
     
     # Print threshold information
     print(f"Laser power: {laser.total_power} W")
@@ -1050,8 +1009,7 @@ def run_vectorized_example():
     substrate_dist, substrate_irradiance_gen, substrate_shadow, substrate_max_extent, substrate_total_physical = tracer.calculate_irradiance_by_generation_vectorized(
         substrate, 1000)
     roller_dist, roller_irradiance_gen, roller_shadow, roller_max_extent, roller_total_physical = tracer.calculate_irradiance_by_generation_vectorized(
-        roller, 100)
- 
+        roller, 100) 
     # Create plots - main plot on top, irradiance plots below
     fig = plt.figure(figsize=(15, 12))
     
