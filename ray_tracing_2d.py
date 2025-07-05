@@ -567,31 +567,46 @@ class VectorizedRayTracer:
         print(f"Ray origin range Z: [{np.min(current_batch.origins[:, 1])*1000:.1f}, {np.max(current_batch.origins[:, 1])*1000:.1f}] mm")
         print(f"Ray direction: [{current_batch.directions[0, 0]:.3f}, {current_batch.directions[0, 1]:.3f}]")
         
-        for reflection in range(self.max_reflections):
-            print(f"Processing reflection {reflection + 1}/{self.max_reflections}...")
-            
-            # Find intersections for current batch
-            self.find_nearest_intersections_vectorized(current_batch)
-            
-            # Debug: Check intersection statistics
-            roller_hits = np.sum(current_batch.hit_surface_ids == 0)
-            substrate_hits = np.sum(current_batch.hit_surface_ids == 1)
-            no_hits = np.sum(current_batch.hit_surface_ids == -1)
-            
-            print(f"  Roller hits: {roller_hits}, Substrate hits: {substrate_hits}, No hits: {no_hits}")
-            
-            # Compute reflected rays
-            reflected_batch = self.compute_reflections_vectorized(current_batch)
-            
-            if reflected_batch is None or reflected_batch.num_rays == 0:
-                print(f"No more reflections after generation {reflection}")
-                break
+        # ALWAYS find intersections for initial batch (direct light)
+        print("Finding intersections for direct light...")
+        self.find_nearest_intersections_vectorized(current_batch)
+        
+        # Debug: Check direct light intersection statistics
+        roller_hits = np.sum(current_batch.hit_surface_ids == 0)
+        substrate_hits = np.sum(current_batch.hit_surface_ids == 1)
+        no_hits = np.sum(current_batch.hit_surface_ids == -1)
+        
+        print(f"Direct light - Roller hits: {roller_hits}, Substrate hits: {substrate_hits}, No hits: {no_hits}")
+        
+        # Process reflections only if max_reflections > 0
+        if self.max_reflections > 0:
+            for reflection in range(self.max_reflections):
+                print(f"Processing reflection {reflection + 1}/{self.max_reflections}...")
                 
-            self.all_ray_batches.append(reflected_batch)
-            current_batch = reflected_batch
-            
-            print(f"Generated {reflected_batch.num_rays} reflected rays with total power: "
-                  f"{np.sum(reflected_batch.powers):.1f} W")
+                # Compute reflected rays
+                reflected_batch = self.compute_reflections_vectorized(current_batch)
+                
+                if reflected_batch is None or reflected_batch.num_rays == 0:
+                    print(f"No more reflections after generation {reflection}")
+                    break
+                    
+                self.all_ray_batches.append(reflected_batch)
+                current_batch = reflected_batch
+                
+                # Find intersections for reflected rays
+                self.find_nearest_intersections_vectorized(current_batch)
+                
+                # Debug: Check intersection statistics for this reflection
+                roller_hits = np.sum(current_batch.hit_surface_ids == 0)
+                substrate_hits = np.sum(current_batch.hit_surface_ids == 1)
+                no_hits = np.sum(current_batch.hit_surface_ids == -1)
+                
+                print(f"  Roller hits: {roller_hits}, Substrate hits: {substrate_hits}, No hits: {no_hits}")
+                
+                print(f"Generated {reflected_batch.num_rays} reflected rays with total power: "
+                      f"{np.sum(reflected_batch.powers):.1f} W")
+        else:
+            print("Direct light only mode (max_reflections=0)")
         
         total_rays = sum(batch.num_rays for batch in self.all_ray_batches)
         print(f"Vectorized ray tracing complete. Total ray segments: {total_rays}")
@@ -969,7 +984,7 @@ def run_vectorized_example():
     substrate = VectorizedCurvedSubstrate(radius=200e-3, refractive_index=1.8) # 200 mm radius, curved substrate
     
     # Create vectorized ray tracer with RELATIVE threshold for power independence
-    tracer = VectorizedRayTracer(laser, roller, substrate, max_reflections=6, min_power_threshold_fraction=1e-6)
+    tracer = VectorizedRayTracer(laser, roller, substrate, max_reflections=0, min_power_threshold_fraction=1e-6)
     
     # Print threshold information
     print(f"Laser power: {laser.total_power} W")
