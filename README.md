@@ -26,10 +26,29 @@ python thermal_model_Grouve.py
 ```
 
 ## Requirements
-- Python 3.x
-- NumPy
-- Matplotlib
-- SciPy (optional, falls back to NumPy interpolation)
+- Python 3.12+
+- NumPy >= 2.4
+- Matplotlib >= 3.10
+- SciPy >= 1.13
+- Streamlit >= 1.35 (for the interactive app)
+
+## Installation
+
+```bash
+# Create and activate a virtual environment
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Linux / macOS
+
+# Install all dependencies
+pip install -e .
+```
+
+### Install dev extras (linting, testing)
+
+```bash
+pip install -e ".[dev]"
+```
 
 ## Physics Model
 - 1D heat equation with thermal diffusion (see W. Grouve paper for details)

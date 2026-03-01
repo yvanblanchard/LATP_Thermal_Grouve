@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "latp-thermal-grouve"
+version = "0.1.0"
+description = "1D thermal simulation and 2D ray tracing for Laser Assisted Tape Placement process"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+dependencies = [
+    "numpy>=2.4",
+    "matplotlib>=3.10",
+    "scipy>=1.13",
+    "streamlit>=1.35",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+latp-app = "app:main"
+latp-thermal = "thermal_model_Grouve:main"
+latp-ray = "ray_tracing_2d:run_vectorized_example"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*.py"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]
