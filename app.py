@@ -116,7 +116,7 @@ def display_results(results):
     """Display simulation results with irradiance plots"""
     
     # Extract results
-    laser = results['laser']
+    #laser = results['laser']
     substrate_dist = results['substrate_dist']
     substrate_shadow = results['substrate_shadow']
     substrate_max_extent = results['substrate_max_extent']

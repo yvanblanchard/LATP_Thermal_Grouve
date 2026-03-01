@@ -1,9 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Tuple, Optional, Union
-from dataclasses import dataclass
+from typing import List, Tuple
 from abc import ABC, abstractmethod
-
 
 class VectorizedRayBatch:
     """
@@ -856,7 +854,7 @@ class VectorizedRayTracer:
                     roller_dist, roller_total_flux, roller_extent, filename="flux_data.txt"):
         """Export physical flux data to text file with 20 points resolution"""
         
-        print(f"Exporting physical flux data...")
+        print("Exporting physical flux data...")
         
         # Find non-zero flux indices
         substrate_nonzero_indices = np.where(substrate_total_flux > 0)[0]
@@ -964,17 +962,18 @@ class VectorizedRayTracer:
         file_handle.write("\n")
 
         
-def run_vectorized_example():
+def run_vectorized_example(reichardt = True):
     """Run vectorized example simulation and create plots"""
     
     # Define system parameters
-    laser = VectorizedLaser(
-        source_length=30e-3,           # 30 mm
-        source_center=np.array([-300e-3, 97e-3]),  # 300 mm left, 97 mm up
-        source_angle=20.0,             # 20 degrees
-        num_rays=10000,                # 10000 rays for high resolution
-        total_power=1.0             # 1 W
-    )
+    if( reichardt is True):
+        laser = VectorizedLaser(
+            source_length=30e-3,           # 30 mm
+            source_center=np.array([-300e-3, 97e-3]),  # 300 mm left, 97 mm up
+            source_angle=20.0,             # 20 degrees
+            num_rays=10000,                # 10000 rays for high resolution
+            total_power=1.0             # 1 W
+        )
     
     roller = VectorizedRoller(radius=35e-3, refractive_index=1.8)        # 35 mm radius
     #substrate = VectorizedSubstrate(length=100e-3, refractive_index=1.8) # 100 mm length
@@ -988,9 +987,9 @@ def run_vectorized_example():
     # Print threshold information
     print(f"Laser power: {laser.total_power} W")
     print(f"Power per ray: {laser.power_per_ray:.6f} W")
-    print(f"Relative threshold fraction: 1e-6")
+    print("Relative threshold fraction: 1e-6")
     print(f"Absolute threshold: {tracer.min_power_threshold:.2e} W")
-    print(f"This ensures same distribution shape regardless of total power!")
+    print("This ensures same distribution shape regardless of total power!")
     
     # Trace all rays with vectorization
     import time
@@ -1011,7 +1010,7 @@ def run_vectorized_example():
     roller_dist, roller_irradiance_gen, roller_shadow, roller_max_extent, roller_total_physical = tracer.calculate_irradiance_by_generation_vectorized(
         roller, 100) 
     # Create plots - main plot on top, irradiance plots below
-    fig = plt.figure(figsize=(15, 12))
+    plt.figure(figsize=(15, 12))
     
     # Main ray tracing plot (top, spanning full width)
     ax1 = plt.subplot2grid((2, 2), (0, 0), colspan=2)
@@ -1064,7 +1063,7 @@ def run_vectorized_example():
             z_coords = [start_point[1], end_point[1]]
             ax1.plot(np.array(y_coords) * 1000, np.array(z_coords) * 1000, 
                     'r-', linewidth=3, alpha=0.9, 
-                    label=f'Single Ray Path' if segment_idx == 0 else '')
+                    label='Single Ray Path' if segment_idx == 0 else '')
         
         # Mark source point of traced ray
         if len(single_ray_path) > 0:
@@ -1167,7 +1166,7 @@ def run_vectorized_example():
     plt.show()
     
     # Print performance and summary statistics
-    print(f"\nVectorized Simulation Summary:")
+    print("\nVectorized Simulation Summary:")
     print(f"Laser source position: Y={laser.source_center[0]*1000:.1f}mm, Z={laser.source_center[1]*1000:.1f}mm")
     print(f"Computation time: {end_time - start_time:.3f} seconds")
     print(f"Total rays: {laser.num_rays}")
@@ -1175,12 +1174,12 @@ def run_vectorized_example():
     print(f"Total laser power: {laser.total_power:.1f} W")
     print(f"Power per ray: {laser.power_per_ray:.3f} W")
     print(f"Single ray traced through {len(single_ray_path)} reflections")
-    print(f"Flux type: Physical (W)")
+    print("Flux type: Physical (W)")
     print(f"Shadow lengths: Substrate = {substrate_shadow*1000:.1f}mm, Incoming Tape = {roller_shadow*1000:.1f}mm")
     print(f"Max extent positions: Substrate = {substrate_max_extent*1000:.1f}mm, Incoming Tape = {roller_max_extent*1000:.1f}mm")
     
     # Print irradiance statistics by generation
-    print(f"\nSubstrate Irradiance by Generation:")
+    print("\nSubstrate Irradiance by Generation:")
     substrate_total_irr = sum(substrate_irradiance_gen)
     for gen_idx, irradiance in enumerate(substrate_irradiance_gen):
         max_irr = np.max(irradiance)
@@ -1191,7 +1190,7 @@ def run_vectorized_example():
     
     print(f"  Total Max = {np.max(substrate_total_irr):.1f} W")
     
-    print(f"\nIncoming Tape Irradiance by Generation:")
+    print("\nIncoming Tape Irradiance by Generation:")
     roller_total_irr = sum(roller_irradiance_gen)
     for gen_idx, irradiance in enumerate(roller_irradiance_gen):
         max_irr = np.max(irradiance)
