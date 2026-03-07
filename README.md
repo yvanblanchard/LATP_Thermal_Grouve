@@ -7,7 +7,6 @@ https://www.researchgate.net/publication/241875537_Towards_a_process_simulation_
 
 ![image](https://github.com/user-attachments/assets/b3731052-0142-428a-a726-80f5bb084c55)
 
-![image](https://github.com/user-attachments/assets/9c18515e-e223-4b0e-8b66-4e38702966d1)
 
 ## Features
 - Thermal modeling for APC-2 Carbon/PEEK materials
@@ -15,22 +14,34 @@ https://www.researchgate.net/publication/241875537_Towards_a_process_simulation_
 - Temperature distribution analysis for tape and substrate
 - Heat transfer calculations with boundary conditions
 - Support for multiple placement velocities
-- Plot heat flux and Surface temperature evolution (22 degrees laser incidence angle)
+- Plot heat flux and Surface temperature evolution
 
 ## Files
-- `thermal_model_Grouve.py` - Main thermal simulation code
+- `thermal_model_Grouve.py` - Main 1D thermal simulation code
+- `ray_tracing_2d.py` - Main 2D optical simulation code
 
 ## Usage
+
+Optical 2D model:
+```python
+streamlit run app.py 
+```
+
+![image](img/Optical_model.png)
+
+Thermal 1D model:
 ```python
 python thermal_model_Grouve.py
 ```
+
+![image](img/Thermal_model.png)
 
 ## Requirements
 - Python 3.12+
 - NumPy >= 2.4
 - Matplotlib >= 3.10
 - SciPy >= 1.13
-- Streamlit >= 1.35 (for the interactive app)
+- Streamlit >= 1.35 (for the optical-model interactive app)
 
 ## Installation
 
@@ -62,8 +73,7 @@ pip install -e ".[dev]"
 - Temperature rise validation against physics predictions
 
 ## Next
-- Temperature through the thickness
-- Compare with 2D FEA model (Calculix solver)
-- Compare with analytical thermal heat exchange model (T. Weiler)
+- link 2D optical numerical model to thermal model (heat fluxes)
 - Laser source with variable intensity distribution
-- Add healing and degradation models, residual stresses (thermo-mechanical) model
+- Add healing and degradation models
+- Laser power optimization for near-constant nip-point temperature

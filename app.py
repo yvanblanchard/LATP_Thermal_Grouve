@@ -15,6 +15,8 @@ def main():
     # Initialize session state
     if 'results' not in st.session_state:
         st.session_state.results = None
+    if 'last_params' not in st.session_state:
+        st.session_state.last_params = None
     
     # Sidebar controls
     st.sidebar.subheader("Laser Source Position")
@@ -31,21 +33,33 @@ def main():
     st.sidebar.subheader("Simulation Parameters")
     max_reflections = st.sidebar.slider("Max Reflections", 0, 5, 3, step=1)
     
-    # Run simulation button
-    if st.sidebar.button("Run Simulation"):
+    # Collect current parameters
+    current_params = {
+        'source_y': -source_y_positive * 1e-3,
+        'source_z': source_z * 1e-3,
+        'laser_angle': laser_angle,
+        'num_rays': num_rays,
+        'max_reflections': max_reflections,
+        'refractive_index': refractive_index,
+    }
+
+    params_changed = st.session_state.last_params != current_params
+    run_clicked = st.sidebar.button("Run Simulation")
+
+    if params_changed or run_clicked:
         with st.spinner("Running ray tracing simulation..."):
             results = run_simulation(
-                source_y=-source_y_positive * 1e-3,  # Convert to meters and make negative
-                source_z=source_z * 1e-3,  # Convert to meters
-                laser_angle=laser_angle,
-                num_rays=num_rays,
-                max_reflections=max_reflections,
-                refractive_index=refractive_index
+                source_y=current_params['source_y'],
+                source_z=current_params['source_z'],
+                laser_angle=current_params['laser_angle'],
+                num_rays=current_params['num_rays'],
+                max_reflections=current_params['max_reflections'],
+                refractive_index=current_params['refractive_index']
             )
-            
+
             if results:
                 st.session_state.results = results
-                st.success("Simulation completed successfully!")
+                st.session_state.last_params = current_params
             else:
                 st.session_state.results = None
     
@@ -159,7 +173,7 @@ def display_results(results):
     # Display summary statistics
     st.subheader("Simulation Summary")
     
-    col1, col2 = st.columns(3)
+    col1, col2 = st.columns(2)
 
     with col1:
         st.metric("Substrate Shadow", f"{substrate_shadow*1000:.1f} mm")
