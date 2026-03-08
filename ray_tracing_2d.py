@@ -969,7 +969,7 @@ def run_vectorized_example(reichardt = True):
     if( reichardt is True):
         laser = VectorizedLaser(
             source_length=30e-3,           # 30 mm
-            source_center=np.array([-150e-3, 60.50e-3]),  # 300 mm left, 97 mm up
+            source_center=np.array([-150e-3, 60.50e-3]),  # X and Y coords (in meters)
             source_angle=22.0,             # 20 degrees
             num_rays=10000,                # 10000 rays for high resolution
             total_power=1.0             # 1 W
