@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from ray_tracing_2d import (
     VectorizedLaser,
     VectorizedRoller,
-    VectorizedCurvedSubstrate,
+    VectorizedSubstrate,
     VectorizedRayTracer
 )
 
@@ -20,15 +20,15 @@ def main():
     
     # Sidebar controls
     st.sidebar.subheader("Laser Source Position")
-    source_y_positive = st.sidebar.slider("Y Position (mm)", 0.0, 400.0, 300.0, step=0.5)
-    source_z = st.sidebar.slider("Z Position (mm)", 50.0, 200.0, 97.0, step=0.5)
+    source_y_positive = st.sidebar.slider("Y Position (mm)", 0.0, 400.0, 150.0, step=0.5)
+    source_z = st.sidebar.slider("Z Position (mm)", 10.0, 200.0, 55.0, step=0.5)
     
     st.sidebar.subheader("Laser Properties")
-    laser_angle = st.sidebar.slider("Laser Angle (degrees)", 0.0, 45.0, 20.0, step=0.5)
-    num_rays = st.sidebar.selectbox("Number of Rays", [1000, 5000, 10000], index=1)
+    laser_angle = st.sidebar.slider("Laser Angle (degrees)", 0.0, 45.0, 22.0, step=0.5)
+    num_rays = st.sidebar.selectbox("Number of Rays", [1000, 5000, 10000], index=2)
     
     st.sidebar.subheader("Material Properties")
-    refractive_index = st.sidebar.slider("Refractive Index", 1.0, 3.0, 1.8, step=0.1)
+    refractive_index = st.sidebar.slider("Refractive Index", 1.0, 3.0, 1.5, step=0.1)
     
     st.sidebar.subheader("Simulation Parameters")
     max_reflections = st.sidebar.slider("Max Reflections", 0, 5, 3, step=1)
@@ -75,8 +75,8 @@ def main():
         st.write("4. Click 'Run Simulation' to see irradiance plots")
         
         st.write("## System Configuration")
-        st.write("- Roller radius: 35 mm")
-        st.write("- Curved substrate radius: 200 mm")
+        st.write("- Roller radius: 40 mm")
+        st.write("- Flat substrate length: 100 mm")
         st.write("- Laser power: 1.0 W (fixed)")
 
 def run_simulation(source_y, source_z, laser_angle, num_rays, max_reflections, refractive_index):
@@ -92,8 +92,8 @@ def run_simulation(source_y, source_z, laser_angle, num_rays, max_reflections, r
         )
         
         # Create surfaces with specified refractive index
-        roller = VectorizedRoller(radius=35e-3, refractive_index=refractive_index)
-        substrate = VectorizedCurvedSubstrate(radius=200e-3, refractive_index=refractive_index)
+        roller = VectorizedRoller(radius=40e-3, refractive_index=refractive_index)
+        substrate = VectorizedSubstrate(length=100e-3, refractive_index=refractive_index)
         
         # Create ray tracer
         tracer = VectorizedRayTracer(
