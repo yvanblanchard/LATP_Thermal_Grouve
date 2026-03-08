@@ -431,8 +431,8 @@ def create_thermal_solver_for_component(thickness, component_name):
     
     return ThermalSolver(MATERIAL_PROPS, geometry, BOUNDARY_CONDITIONS)
 
-def simulate_component_heating(distance_points, flux_values, thickness, velocity, 
-                             laser_power, simulation_time=0.4):
+def simulate_component_heating(distance_points, flux_values, thickness, velocity,
+                             laser_power, simulation_time=0.4, cooling_time=0.0):
     """Simulate heating of substrate or tape component"""
     sim_start = time.perf_counter()
     
@@ -492,17 +492,19 @@ def simulate_component_heating(distance_points, flux_values, thickness, velocity
     # Calculate simulation time needed to travel from start to nip-point
     travel_distance = abs(starting_distance - ending_distance)
     required_time = travel_distance / velocity
-    actual_sim_time = required_time  # Always simulate full travel distance to nip-point
-    
+    actual_sim_time = required_time  # Heating phase duration (until nip-point)
+    total_sim_time_extended = actual_sim_time + cooling_time
+
     print(f"    === SIMULATION SETUP ===")
     print(f"    Starting distance: {starting_distance*1000:.1f} mm from nip-point")
     print(f"    Travel distance: {travel_distance*1000:.1f} mm")
     print(f"    Travel time: {required_time:.3f} s")
-    print(f"    Simulation time: {actual_sim_time:.3f} s")
-    
+    print(f"    Heating time: {actual_sim_time:.3f} s, Cooling time: {cooling_time:.3f} s")
+    print(f"    Total simulation time: {total_sim_time_extended:.3f} s")
+
     # CRITICAL: Use very small time step for stability with high heat flux
     dt = min(0.0001, actual_sim_time/2000)  # 0.1ms or smaller
-    time_array = np.arange(0, actual_sim_time + dt, dt)
+    time_array = np.arange(0, total_sim_time_extended + dt, dt)
     n_steps = len(time_array)
     
     # Stability check: Fourier number should be < 0.5
@@ -517,12 +519,15 @@ def simulate_component_heating(distance_points, flux_values, thickness, velocity
     if fourier_number > 0.5:
         print(f"    ⚠️  Fourier number > 0.5 may cause instability!")
         dt = 0.4 * dz**2 / alpha  # Reduce time step
-        time_array = np.arange(0, actual_sim_time + dt, dt)
+        time_array = np.arange(0, total_sim_time_extended + dt, dt)
         n_steps = len(time_array)
         print(f"    Reduced to dt = {dt*1000:.2f} ms ({n_steps} steps)")
     
     # Heat flux function - converts normalized flux to physical values
     def heat_flux_func(t):
+        # No laser heating after material passes nip-point (cooling phase)
+        if t >= actual_sim_time:
+            return 0.0
         # Material starts at starting_distance and moves toward nip-point
         current_distance = starting_distance + velocity * t
         current_distance = min(current_distance, 0.0)  # Cap at nip-point
@@ -754,6 +759,89 @@ def plot_surface_temperatures_22deg():
     print(f"Peak power density: {max_power_density/1e5:.2f} W/mm²")
     print(f"Peak physical flux: {actual_peak_flux:.3f} W/mm²")
 
+def plot_temperature_history_22deg():
+    """Plot surface temperature history over time (heating + cooling) for laser angle 22°.
+
+    Shows the full transient response: temperature rise during laser heating as the
+    material approaches the nip-point, followed by free cooling afterward.
+    """
+    laser_angle = PROCESS_PARAMS['laser_angles'][0]  # 22 degrees
+    cooling_time = 2.0  # seconds of free cooling after nip-point
+    print(f"\n=== PLOTTING TEMPERATURE HISTORY (α = {laser_angle}°) ===")
+    print(f"Cooling duration after nip-point: {cooling_time} s")
+
+    substrate_dist, substrate_flux, tape_dist, tape_flux = compute_heat_fluxes_from_ray_tracing(laser_angle)
+
+    velocities = PROCESS_PARAMS['velocities']
+    laser_power = PROCESS_PARAMS['laser_power']
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    colors = ['red', 'green']
+
+    # --- Substrate ---
+    print("\n--- SUBSTRATE TEMPERATURE HISTORY ---")
+    for i, velocity in enumerate(velocities):
+        try:
+            time_array, surf_temp, _, _ = simulate_component_heating(
+                substrate_dist, substrate_flux,
+                PROCESS_PARAMS['substrate_thickness'],
+                velocity, laser_power,
+                cooling_time=cooling_time
+            )
+            nip_time = abs(min(substrate_dist)) / velocity
+            ax1.plot(time_array, surf_temp, colors[i], linewidth=2,
+                     label=f'v = {velocity} m/s')
+            ax1.axvline(x=nip_time, color=colors[i], linestyle=':', linewidth=1.5, alpha=0.7)
+            ax1.text(nip_time, 0.97, f'nip\n{velocity} m/s',
+                     transform=ax1.get_xaxis_transform(),
+                     color=colors[i], fontsize=7, ha='center', va='top')
+        except Exception as e:
+            print(f"  Error substrate v={velocity}: {e}")
+
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Surface Temperature (°C)')
+    ax1.set_title('Substrate: Temperature History\n(Heating + Cooling)')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+
+    # --- Tape ---
+    print("\n--- TAPE TEMPERATURE HISTORY ---")
+    for i, velocity in enumerate(velocities):
+        try:
+            time_array, surf_temp, _, _ = simulate_component_heating(
+                tape_dist, tape_flux,
+                PROCESS_PARAMS['tape_thickness'],
+                velocity, laser_power,
+                cooling_time=cooling_time
+            )
+            nip_time = abs(min(tape_dist)) / velocity
+            ax2.plot(time_array, surf_temp, colors[i], linewidth=2,
+                     label=f'v = {velocity} m/s')
+            ax2.axvline(x=nip_time, color=colors[i], linestyle=':', linewidth=1.5, alpha=0.7)
+            ax2.text(nip_time, 0.97, f'nip\n{velocity} m/s',
+                     transform=ax2.get_xaxis_transform(),
+                     color=colors[i], fontsize=7, ha='center', va='top')
+        except Exception as e:
+            print(f"  Error tape v={velocity}: {e}")
+
+    ax2.set_xlabel('Time (s)')
+    ax2.set_ylabel('Surface Temperature (°C)')
+    ax2.set_title('Incoming Tape: Temperature History\n(Heating + Cooling)')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.suptitle(
+        f'Temperature History — Heating & Cooling (α = {laser_angle}°)\n'
+        f'Dashed vertical lines = nip-point passage',
+        y=1.03, fontsize=13
+    )
+    image_filename = f'thermal_history_alpha{laser_angle}deg.png'
+    plt.savefig(image_filename, dpi=150, bbox_inches='tight')
+    print(f"\nFigure saved to: {image_filename}")
+    plt.show()
+
+
 def main():
     """Main function to run the example"""
     main_start = time.perf_counter()
@@ -808,6 +896,7 @@ def main():
     try:
         simulation_start = time.perf_counter()
         plot_surface_temperatures_22deg()
+        plot_temperature_history_22deg()
         simulation_time = time.perf_counter() - simulation_start
         
         main_time = time.perf_counter() - main_start
