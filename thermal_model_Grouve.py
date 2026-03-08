@@ -38,6 +38,8 @@ except ImportError:
     print("Warning: scipy not available, using linear interpolation")
     HAS_SCIPY = False
 
+
+
 class ThermalSolver:
     def __init__(self, material_props, geometry, boundary_conditions):
         start_time = time.perf_counter()
@@ -284,8 +286,113 @@ BOUNDARY_CONDITIONS = {
     'T_initial': 20    # °C - initial temperature
 }
 
+# Laser/optical geometry parameters (shared between ray tracer and analytical model)
+OPTICAL_MODEL_PARAMS = {
+    'Rr': 40,              # mm - roller radius (matches PROCESS_PARAMS roller_radius)
+    'substrate_length': 0.100,  # m (100 mm) - flat substrate length
+    'yl': -150,            # mm - laser source y-position (negative = left of nip-point)
+    'zl': 60.50,              # mm - laser source z-position (height above nip-point)
+    'hl': 30,              # mm - laser source length (matches PROCESS_PARAMS beam_width)
+    'n_tape': 1.5,         # refractive index of tape / substrate
+    'n_roller': 1.4        # refractive index of roller (kept for reference)
+}
+
+# Ray tracing parameters
+RAY_TRACING_PARAMS = {
+    'num_rays': 5000,                        # number of rays (higher = more accurate, slower)
+    'max_reflections': 3,                    # maximum reflection bounces to trace
+    'min_power_threshold_fraction': 1e-6,    # relative power cutoff for ray termination
+    'num_flux_points': 200                   # spatial discretization points for flux profile
+}
+
+def compute_heat_fluxes_from_ray_tracing(laser_angle_deg):
+    """Compute heat flux distributions using 2D vectorized ray tracing.
+
+    Runs VectorizedRayTracer for the given laser angle and returns substrate and
+    tape flux arrays with distances expressed in meters using the negative
+    convention (distances increase from most-negative toward 0 at the nip-point),
+    ready for direct use in simulate_component_heating.
+
+    Parameters
+    ----------
+    laser_angle_deg : float
+        Laser incidence angle in degrees.
+
+    Returns
+    -------
+    substrate_distance : ndarray  – arc-distances on substrate [m], negative
+    substrate_flux     : ndarray  – absorbed power fraction on substrate
+    tape_distance      : ndarray  – arc-distances on tape [m], negative
+    tape_flux          : ndarray  – absorbed power fraction on tape
+    """
+    from ray_tracing_2d import (
+        VectorizedLaser, VectorizedRoller, VectorizedSubstrate, VectorizedRayTracer
+    )
+
+    laser = VectorizedLaser(
+        source_length=OPTICAL_MODEL_PARAMS['hl'] / 1000.0,
+        source_center=np.array([OPTICAL_MODEL_PARAMS['yl'] / 1000.0,
+                                 OPTICAL_MODEL_PARAMS['zl'] / 1000.0]),
+        source_angle=laser_angle_deg,
+        num_rays=RAY_TRACING_PARAMS['num_rays'],
+        total_power=1.0
+    )
+
+    roller = VectorizedRoller(
+        radius=OPTICAL_MODEL_PARAMS['Rr'] / 1000.0,
+        refractive_index=OPTICAL_MODEL_PARAMS['n_tape']
+    )
+    substrate = VectorizedSubstrate(
+        length=OPTICAL_MODEL_PARAMS['substrate_length'],
+        refractive_index=OPTICAL_MODEL_PARAMS['n_tape']
+    )
+
+    tracer = VectorizedRayTracer(
+        laser, roller, substrate,
+        max_reflections=RAY_TRACING_PARAMS['max_reflections'],
+        min_power_threshold_fraction=RAY_TRACING_PARAMS['min_power_threshold_fraction']
+    )
+
+    print(f"Ray tracing heat flux computation (alpha={laser_angle_deg}°)...")
+    tracer.trace_all_rays_vectorized()
+
+    substrate_dist, _, _, _, substrate_total = (
+        tracer.calculate_irradiance_by_generation_vectorized(
+            substrate, RAY_TRACING_PARAMS['num_flux_points']
+        )
+    )
+    tape_dist, _, _, _, tape_total = (
+        tracer.calculate_irradiance_by_generation_vectorized(
+            roller, RAY_TRACING_PARAMS['num_flux_points']
+        )
+    )
+
+    # Flat substrate: calculate_irradiance_by_generation_vectorized returns
+    # distances_from_nip = abs(y_points) where y_points = linspace(-length, 0, N).
+    # distances_from_nip therefore goes from length (index 0) down to 0 (index -1).
+    # Negate to recover the signed positions (from -length to 0).
+    substrate_distance = -substrate_dist   # [m], from -length to 0
+    substrate_flux = np.maximum(substrate_total, 0.0)
+
+    # Roller (tape): distances_from_nip goes from max (theta=pi, index 0) down to 0
+    # (theta=3*pi/2, last index). Negate to get negative convention.
+    tape_distance = -tape_dist    # [m], 0 at nip-point
+    tape_flux = np.maximum(tape_total, 0.0)
+
+    print(f"Ray tracing complete (alpha={laser_angle_deg}°):")
+    print(f"  Substrate range: [{substrate_distance.min()*1000:.1f}, {substrate_distance.max()*1000:.1f}] mm, "
+          f"max flux={np.max(substrate_flux):.4f}")
+    print(f"  Tape range: [{tape_distance.min()*1000:.1f}, {tape_distance.max()*1000:.1f}] mm, "
+          f"max flux={np.max(tape_flux):.4f}")
+
+    return substrate_distance, substrate_flux, tape_distance, tape_flux
+
 def extract_heat_flux_data_22deg():
-    """Extract heat flux data from Figure 4 for laser angle α = 22°"""
+    """Extract hard-coded heat flux data from Figure 4 for laser angle α = 22°.
+
+    Kept for reference / comparison purposes. The main simulation now uses
+    compute_heat_fluxes_from_ray_tracing() instead.
+    """
     
     # Substrate surface heat flux
     substrate_distance = np.array([
@@ -385,7 +492,7 @@ def simulate_component_heating(distance_points, flux_values, thickness, velocity
     # Calculate simulation time needed to travel from start to nip-point
     travel_distance = abs(starting_distance - ending_distance)
     required_time = travel_distance / velocity
-    actual_sim_time = min(simulation_time, required_time)
+    actual_sim_time = required_time  # Always simulate full travel distance to nip-point
     
     print(f"    === SIMULATION SETUP ===")
     print(f"    Starting distance: {starting_distance*1000:.1f} mm from nip-point")
@@ -490,16 +597,19 @@ def simulate_component_heating(distance_points, flux_values, thickness, velocity
     return time_array, surface_temp, distance_from_nip, heat_flux_normalized
 
 def plot_surface_temperatures_22deg():
-    """Plot surface temperatures and NORMALIZED heat flux for laser angle 22° with dual y-axes
-    Uses updated heat flux distributions per user specifications"""
+    """Plot surface temperatures and NORMALIZED heat flux for laser angle 22° with dual y-axes.
+
+    Heat flux distributions are computed by the LATW optical model.
+    """
     plot_start = time.perf_counter()
-    print("\n=== PLOTTING SURFACE TEMPERATURES & NORMALIZED HEAT FLUX (α = 22°) ===")
-    print("=== USING UPDATED HEAT FLUX DISTRIBUTIONS ===")
-    
+    laser_angle = PROCESS_PARAMS['laser_angles'][0]  # 22 degrees
+    print(f"\n=== PLOTTING SURFACE TEMPERATURES & NORMALIZED HEAT FLUX (α = {laser_angle}°) ===")
+    print("=== USING RAY TRACING HEAT FLUX DISTRIBUTIONS ===")
+
     data_start = time.perf_counter()
-    substrate_dist, substrate_flux, tape_dist, tape_flux = extract_heat_flux_data_22deg()
+    substrate_dist, substrate_flux, tape_dist, tape_flux = compute_heat_fluxes_from_ray_tracing(laser_angle)
     data_time = time.perf_counter() - data_start
-    print(f"Heat flux data extraction: {data_time*1000:.2f} ms")
+    print(f"Ray tracing heat flux computation: {data_time*1000:.2f} ms")
     
     velocities = PROCESS_PARAMS['velocities']
     laser_power = PROCESS_PARAMS['laser_power']
@@ -536,7 +646,8 @@ def plot_surface_temperatures_22deg():
     
     # Plot NORMALIZED heat flux on right y-axis (as in paper Figure 4)
     flux_interp = create_heat_flux_interpolator(substrate_dist, substrate_flux)
-    dist_range = np.linspace(-80, 0, 200)  # mm
+    subs_dist_min_mm = substrate_dist[0] * 1000  # most negative, in mm
+    dist_range = np.linspace(subs_dist_min_mm, 0, 200)  # mm
     
     # Get normalized flux values (0-1) directly from interpolator
     flux_normalized = [max(0, flux_interp(d/1000)) for d in dist_range]  # Convert mm to m for interpolator
@@ -552,7 +663,7 @@ def plot_surface_temperatures_22deg():
     ax1.set_ylabel('Temperature (°C)', color='blue')
     ax1.set_title('Substrate:\nTemperature & Heat Flux')
     ax1.grid(True, alpha=0.3)
-    ax1.set_xlim(-80, 0)
+    ax1.set_xlim(subs_dist_min_mm, 0)
     ax1.tick_params(axis='y', labelcolor='blue')
     
     ax1_flux.set_ylabel('Normalized heat flux (-)', color='black')
@@ -589,7 +700,8 @@ def plot_surface_temperatures_22deg():
     
     # Plot NORMALIZED heat flux on right y-axis
     flux_interp_tape = create_heat_flux_interpolator(tape_dist, tape_flux)
-    dist_range_tape = np.linspace(-60, 0, 200)  # mm
+    tape_dist_min_mm = tape_dist[0] * 1000  # most negative (farthest from nip), in mm
+    dist_range_tape = np.linspace(tape_dist_min_mm, 0, 200)  # mm
     
     flux_normalized_tape = [max(0, flux_interp_tape(d/1000)) for d in dist_range_tape]  # Convert mm to m
     
@@ -604,7 +716,7 @@ def plot_surface_temperatures_22deg():
     ax2.set_ylabel('Temperature (°C)', color='blue')
     ax2.set_title('Incoming Tape\nTemperature & Heat Flux')
     ax2.grid(True, alpha=0.3)
-    ax2.set_xlim(-60, 0)
+    ax2.set_xlim(tape_dist_min_mm, 0)
     ax2.tick_params(axis='y', labelcolor='blue')
     
     ax2_flux.set_ylabel('Normalized heat flux (-)', color='black')
@@ -619,7 +731,10 @@ def plot_surface_temperatures_22deg():
     # Final plot rendering
     render_start = time.perf_counter()
     plt.tight_layout()
-    plt.suptitle('Surface Temperatures & Custom Heat Flux Distributions (α = 22°)', y=1.02, fontsize=14)
+    plt.suptitle(f'Surface Temperatures & Ray Tracing Heat Flux Distributions (α = {laser_angle}°)', y=1.02, fontsize=14)
+    image_filename = f'thermal_results_alpha{laser_angle}deg.png'
+    plt.savefig(image_filename, dpi=150, bbox_inches='tight')
+    print(f"Figure saved to: {image_filename}")
     plt.show()
     render_time = time.perf_counter() - render_start
     

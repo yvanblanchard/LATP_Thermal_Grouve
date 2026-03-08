@@ -969,15 +969,15 @@ def run_vectorized_example(reichardt = True):
     if( reichardt is True):
         laser = VectorizedLaser(
             source_length=30e-3,           # 30 mm
-            source_center=np.array([-300e-3, 97e-3]),  # 300 mm left, 97 mm up
-            source_angle=20.0,             # 20 degrees
+            source_center=np.array([-150e-3, 60.50e-3]),  # 300 mm left, 97 mm up
+            source_angle=22.0,             # 20 degrees
             num_rays=10000,                # 10000 rays for high resolution
             total_power=1.0             # 1 W
-        )
+        )#
     
-    roller = VectorizedRoller(radius=35e-3, refractive_index=1.8)        # 35 mm radius
-    #substrate = VectorizedSubstrate(length=100e-3, refractive_index=1.8) # 100 mm length
-    substrate = VectorizedCurvedSubstrate(radius=200e-3, refractive_index=1.8) # 200 mm radius, curved substrate
+    roller = VectorizedRoller(radius=40e-3, refractive_index=1.8)        # 35 mm radius
+    substrate = VectorizedSubstrate(length=100e-3, refractive_index=1.5) # 100 mm length
+    #substrate = VectorizedCurvedSubstrate(radius=200e-3, refractive_index=1.5) # 200 mm radius, curved substrate
     
     # Create vectorized ray tracer with RELATIVE threshold for power independence
     tracer = VectorizedRayTracer(laser, roller, substrate, 
