@@ -301,7 +301,191 @@ class VectorizedCurvedSubstrate(VectorizedRoller):
         y = self.center[0] + self.radius * np.cos(theta)
         z = self.center[1] + self.radius * np.sin(theta)
         return y, z
-    
+
+
+class VectorizedPolygonalSubstrate(VectorizedSurface):
+    """
+    Vectorized polygonal substrate - arbitrary shape defined by connected line segments.
+
+    The substrate is specified as an ordered sequence of (y, z) vertices.  The **last
+    vertex** is expected to coincide with (or be closest to) the nip point at (0, 0).
+    Surface normals are automatically oriented toward positive z (laser side) so that
+    Fresnel calculations are consistent with the rest of the ray tracer.
+
+    Any substrate profile that can be approximated by straight segments is supported:
+    flat, inclined, V-groove, stepped, curved (piece-wise linear), etc.
+    """
+
+    def __init__(self, vertices: np.ndarray, refractive_index: float = 1.8):
+        """
+        Parameters
+        ----------
+        vertices : array-like, shape (N, 2)
+            Ordered [y, z] coordinates of the substrate polygon.  The first vertex is the
+            far end; the last vertex must be at or near (0, 0) (the nip point).
+        refractive_index : float
+            Optical refractive index of the substrate material.
+        """
+        super().__init__(surface_id=1, refractive_index=refractive_index)
+        self.vertices = np.asarray(vertices, dtype=float)
+        if len(self.vertices) < 2:
+            raise ValueError("VectorizedPolygonalSubstrate requires at least 2 vertices.")
+
+        # Precompute per-segment quantities
+        self.segment_starts = self.vertices[:-1]                          # (M, 2)
+        self.segment_ends = self.vertices[1:]                             # (M, 2)
+        self.segment_deltas = self.segment_ends - self.segment_starts     # (M, 2)
+        self.segment_lengths = np.linalg.norm(self.segment_deltas, axis=1)  # (M,)
+        self.num_segments = len(self.segment_starts)
+
+        # Cumulative arc length measured from the first vertex
+        self.cumulative_lengths = np.concatenate(
+            [[0.0], np.cumsum(self.segment_lengths)])
+        self.total_length = float(self.cumulative_lengths[-1])
+
+        # Precompute outward normals (pointing toward positive z, i.e., toward the laser)
+        self._precompute_normals()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _precompute_normals(self) -> None:
+        """Compute one outward-facing unit normal per segment."""
+        safe_lens = np.maximum(self.segment_lengths[:, np.newaxis], 1e-12)
+        dirs = self.segment_deltas / safe_lens          # unit segment direction
+
+        # Two candidate perpendicular directions (90° CCW and 90° CW rotations)
+        n_ccw = np.column_stack([-dirs[:, 1], dirs[:, 0]])   # (-dz,  dy) - 90° CCW
+        n_cw  = np.column_stack([ dirs[:, 1], -dirs[:, 0]])  # ( dz, -dy) - 90° CW
+
+        # Choose the option with non-negative z-component (pointing toward laser)
+        use_ccw = n_ccw[:, 1] >= 0
+        self.segment_normals = np.where(use_ccw[:, np.newaxis], n_ccw, n_cw)
+
+    def _normals_for_segment_indices(self, seg_indices: np.ndarray) -> np.ndarray:
+        """Return precomputed normals for given array of segment indices."""
+        return self.segment_normals[seg_indices]
+
+    # ------------------------------------------------------------------
+    # VectorizedSurface interface
+    # ------------------------------------------------------------------
+
+    def intersect_rays_vectorized(self, ray_batch: "VectorizedRayBatch") -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Vectorized ray–polygon intersection.
+
+        Tests every segment against every active ray simultaneously using the
+        2-D parametric system:
+            origin + t * direction = P1 + s * (P2 − P1),   t > 0, s ∈ [0, 1]
+        The closest valid intersection per ray is returned.
+        """
+        origins    = ray_batch.origins[ray_batch.active_mask]
+        directions = ray_batch.directions[ray_batch.active_mask]
+
+        if len(origins) == 0:
+            return np.array([], dtype=bool), np.empty((0, 2)), np.array([])
+
+        num_rays = len(origins)
+        best_t      = np.full(num_rays, np.inf)
+        best_points = np.full((num_rays, 2), np.nan)
+
+        for seg_idx in range(self.num_segments):
+            p1 = self.segment_starts[seg_idx]   # (2,)
+            dv = self.segment_deltas[seg_idx]    # (2,)
+
+            # 2x2 linear system via Cramer's rule: direction * t - dv * s = p1 - origin
+            dy = directions[:, 0]
+            dz = directions[:, 1]
+
+            det = dy * dv[1] - dz * dv[0]
+            non_par = np.abs(det) > 1e-12
+            if not np.any(non_par):
+                continue
+
+            rhs = p1[np.newaxis, :] - origins   # (N, 2)
+
+            t = np.full(num_rays, np.inf)
+            s = np.full(num_rays, -1.0)
+
+            t[non_par] = (rhs[non_par, 0] * dv[1] - rhs[non_par, 1] * dv[0]) / det[non_par]
+            s[non_par] = (rhs[non_par, 0] * dz[non_par] - rhs[non_par, 1] * dy[non_par]) / det[non_par]
+
+            valid = non_par & (t > 1e-10) & (s >= -1e-9) & (s <= 1.0 + 1e-9)
+            improve = valid & (t < best_t)
+
+            if np.any(improve):
+                best_t[improve] = t[improve]
+                best_points[improve] = (origins[improve]
+                                        + best_t[improve, np.newaxis] * directions[improve])
+
+        hit_mask = ~np.isinf(best_t)
+        return hit_mask, best_points, best_t
+
+    def get_normals_vectorized(self, points: np.ndarray) -> np.ndarray:
+        """Return outward normals at given surface points (fully vectorised).
+
+        For each query point the nearest segment is found and its precomputed
+        normal is returned.
+        """
+        if len(points) == 0:
+            return np.empty((0, 2))
+
+        # Broadcast: p (N,1,2), p1 (1,M,2), dv (1,M,2), lens (1,M)
+        p   = points[:, np.newaxis, :]                          # (N, 1, 2)
+        p1  = self.segment_starts[np.newaxis, :, :]             # (1, M, 2)
+        dv  = self.segment_deltas[np.newaxis, :, :]             # (1, M, 2)
+        sq_lens = (self.segment_lengths ** 2)[np.newaxis, :]    # (1, M)
+
+        diff = p - p1                                           # (N, M, 2)
+        t    = np.sum(diff * dv, axis=2) / np.maximum(sq_lens, 1e-24)  # (N, M)
+        t    = np.clip(t, 0.0, 1.0)
+
+        closest = p1 + t[:, :, np.newaxis] * dv                # (N, M, 2)
+        dists   = np.linalg.norm(p - closest, axis=2)          # (N, M)
+        nearest = np.argmin(dists, axis=1)                      # (N,)
+
+        return self.segment_normals[nearest]
+
+    def get_points_for_plotting(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return vertex coordinates for plotting."""
+        return self.vertices[:, 0], self.vertices[:, 1]
+
+    # ------------------------------------------------------------------
+    # Irradiance-calculation helper
+    # ------------------------------------------------------------------
+
+    def get_arc_positions(self, num_points: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Sample *num_points* positions uniformly along the substrate arc.
+
+        Returns
+        -------
+        positions : ndarray, shape (num_points, 2)
+            [y, z] coordinates of the sample points.
+        distances_from_nip : ndarray, shape (num_points,)
+            Arc-length distance of each sample point from the nip point
+            (last vertex, assumed to be at or near (0, 0)).
+        """
+        arc_samples = np.linspace(0.0, self.total_length, num_points)
+
+        # Find which segment each sample belongs to (vectorised via searchsorted)
+        seg_indices = np.searchsorted(self.cumulative_lengths[1:], arc_samples, side='right')
+        seg_indices = np.clip(seg_indices, 0, self.num_segments - 1)
+
+        seg_start_arcs = self.cumulative_lengths[seg_indices]
+        seg_lens       = self.segment_lengths[seg_indices]
+        t_vals = np.clip(
+            (arc_samples - seg_start_arcs) / np.maximum(seg_lens, 1e-12),
+            0.0, 1.0)
+
+        positions = (self.segment_starts[seg_indices]
+                     + t_vals[:, np.newaxis] * self.segment_deltas[seg_indices])
+
+        # Distance from nip point = total length minus arc length from start
+        distances_from_nip = self.total_length - arc_samples
+
+        return positions, distances_from_nip
+
+
 class VectorizedLaser:
     """Vectorized laser source definition"""
     
@@ -679,7 +863,11 @@ class VectorizedRayTracer:
             # Arc distance from nip point (0,0) along the curved substrate surface
             # theta = 0 is at (radius, -radius), theta = pi/2 is nip point (0,0), theta = pi is at (-radius, -radius)
             distances_from_nip = np.abs(theta_points - np.pi/2) * surface.radius
-            
+
+        elif isinstance(surface, VectorizedPolygonalSubstrate):
+            # For polygonal substrate - arc distance from nip point (last vertex)
+            positions, distances_from_nip = surface.get_arc_positions(num_points)
+
         else:  # VectorizedRoller
             # For roller (quarter circle) - arc distance from nip point (0,0)
             theta_points = np.linspace(np.pi, 3*np.pi/2, num_points)  # From pi to 3pi/2
@@ -978,6 +1166,15 @@ def run_vectorized_example(reichardt = True):
     roller = VectorizedRoller(radius=40e-3, refractive_index=1.8)        # 35 mm radius
     substrate = VectorizedSubstrate(length=100e-3, refractive_index=1.5) # 100 mm length
     #substrate = VectorizedCurvedSubstrate(radius=200e-3, refractive_index=1.5) # 200 mm radius, curved substrate
+    # V-groove example: any arbitrary shape via VectorizedPolygonalSubstrate
+    # vertices define the profile from far end to nip point (0, 0)
+    # groove_angle = 20°, half-width = 50 mm → depth ≈ 18.2 mm
+    #groove_angle = np.radians(20)
+    #substrate = VectorizedPolygonalSubstrate(
+    #    vertices=np.array([[-100e-3, 0.0],
+    #                        [-50e-3, -50e-3 * np.tan(groove_angle)],
+    #                        [0.0, 0.0]]),
+    #    refractive_index=1.5)
     
     # Create vectorized ray tracer with RELATIVE threshold for power independence
     tracer = VectorizedRayTracer(laser, roller, substrate, 

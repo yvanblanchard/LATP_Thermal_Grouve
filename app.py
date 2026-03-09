@@ -5,6 +5,8 @@ from ray_tracing_2d import (
     VectorizedLaser,
     VectorizedRoller,
     VectorizedSubstrate,
+    VectorizedCurvedSubstrate,
+    VectorizedPolygonalSubstrate,
     VectorizedRayTracer
 )
 
@@ -26,13 +28,26 @@ def main():
     st.sidebar.subheader("Laser Properties")
     laser_angle = st.sidebar.slider("Laser Angle (degrees)", 0.0, 45.0, 22.0, step=0.5)
     num_rays = st.sidebar.selectbox("Number of Rays", [1000, 5000, 10000], index=2)
-    
+
     st.sidebar.subheader("Material Properties")
     refractive_index = st.sidebar.slider("Refractive Index", 1.0, 3.0, 1.5, step=0.1)
-    
+
+    st.sidebar.subheader("Substrate Shape")
+    substrate_shape = st.sidebar.selectbox(
+        "Substrate Type",
+        ["Flat", "Curved (Arc)", "V-Groove"],
+        index=0,
+    )
+    substrate_radius = 200.0
+    groove_angle = 20.0
+    if substrate_shape == "Curved (Arc)":
+        substrate_radius = st.sidebar.slider("Substrate Radius (mm)", 50.0, 500.0, 200.0, step=10.0)
+    elif substrate_shape == "V-Groove":
+        groove_angle = st.sidebar.slider("Groove Half-Angle (degrees)", 5.0, 45.0, 20.0, step=1.0)
+
     st.sidebar.subheader("Simulation Parameters")
     max_reflections = st.sidebar.slider("Max Reflections", 0, 5, 3, step=1)
-    
+
     # Collect current parameters
     current_params = {
         'source_y': -source_y_positive * 1e-3,
@@ -41,6 +56,9 @@ def main():
         'num_rays': num_rays,
         'max_reflections': max_reflections,
         'refractive_index': refractive_index,
+        'substrate_shape': substrate_shape,
+        'substrate_radius': substrate_radius,
+        'groove_angle': groove_angle,
     }
 
     params_changed = st.session_state.last_params != current_params
@@ -54,7 +72,10 @@ def main():
                 laser_angle=current_params['laser_angle'],
                 num_rays=current_params['num_rays'],
                 max_reflections=current_params['max_reflections'],
-                refractive_index=current_params['refractive_index']
+                refractive_index=current_params['refractive_index'],
+                substrate_shape=current_params['substrate_shape'],
+                substrate_radius=current_params['substrate_radius'],
+                groove_angle=current_params['groove_angle'],
             )
 
             if results:
@@ -62,7 +83,7 @@ def main():
                 st.session_state.last_params = current_params
             else:
                 st.session_state.results = None
-    
+
     # Display results if available
     if st.session_state.results:
         display_results(st.session_state.results)
@@ -70,16 +91,20 @@ def main():
         # Display default information
         st.write("## Instructions")
         st.write("1. Adjust laser source coordinates (Y, Z) in the sidebar")
-        st.write("2. Set laser angle in degrees")
+        st.write("2. Set laser angle and number of rays")
         st.write("3. Configure refractive index for materials")
-        st.write("4. Click 'Run Simulation' to see irradiance plots")
-        
+        st.write("4. Select substrate shape (Flat / Curved Arc / V-Groove)")
+        st.write("5. Adjust shape-specific parameters (radius or groove angle) if needed")
+        st.write("6. Click 'Run Simulation' to see irradiance plots")
+
         st.write("## System Configuration")
         st.write("- Roller radius: 40 mm")
         st.write("- Flat substrate length: 100 mm")
         st.write("- Laser power: 1.0 W (fixed)")
 
-def run_simulation(source_y, source_z, laser_angle, num_rays, max_reflections, refractive_index):
+
+def run_simulation(source_y, source_z, laser_angle, num_rays, max_reflections, refractive_index,
+                   substrate_shape="Flat", substrate_radius=200.0, groove_angle=20.0):
     """Run the ray tracing simulation with given parameters"""
     try:
         # Create laser with specified parameters
@@ -93,7 +118,21 @@ def run_simulation(source_y, source_z, laser_angle, num_rays, max_reflections, r
         
         # Create surfaces with specified refractive index
         roller = VectorizedRoller(radius=40e-3, refractive_index=refractive_index)
-        substrate = VectorizedSubstrate(length=100e-3, refractive_index=refractive_index)
+
+        if substrate_shape == "Curved (Arc)":
+            substrate = VectorizedCurvedSubstrate(
+                radius=substrate_radius * 1e-3,
+                refractive_index=refractive_index)
+        elif substrate_shape == "V-Groove":
+            half_length = 50e-3  # 50 mm half-width
+            depth = half_length * np.tan(np.radians(groove_angle))
+            substrate = VectorizedPolygonalSubstrate(
+                vertices=np.array([[-2 * half_length, 0.0],
+                                   [-half_length, -depth],
+                                   [0.0, 0.0]]),
+                refractive_index=refractive_index)
+        else:  # Flat (default)
+            substrate = VectorizedSubstrate(length=100e-3, refractive_index=refractive_index)
         
         # Create ray tracer
         tracer = VectorizedRayTracer(
