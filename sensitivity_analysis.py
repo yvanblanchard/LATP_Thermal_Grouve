@@ -565,6 +565,149 @@ def plot_percentage_sensitivity(angle_results: list[dict],
 
 
 # ---------------------------------------------------------------------------
+# Combined perturbation sweep  (full 2-D grid: angle × height)
+# ---------------------------------------------------------------------------
+
+def sweep_combined() -> dict:
+    """
+    Run a full 2-D grid sweep over ANGLE_RANGE × HEIGHT_RANGE.
+
+    Returns
+    -------
+    dict with keys:
+        angles        : (A,) array of swept angle values (degrees)
+        heights       : (H,) array of swept height values (metres)
+        max_sub_flux  : (A, H) peak substrate flux for each (angle, height) pair
+        max_roll_flux : (A, H) peak tape flux
+        peak_abs_diff : (A, H) peak |substrate − tape| flux difference
+        mean_abs_diff : (A, H) mean |substrate − tape| flux difference
+    """
+    n_a = len(ANGLE_RANGE)
+    n_h = len(HEIGHT_RANGE)
+    max_sub   = np.zeros((n_a, n_h))
+    max_roll  = np.zeros((n_a, n_h))
+    peak_diff = np.zeros((n_a, n_h))
+    mean_diff = np.zeros((n_a, n_h))
+
+    total = n_a * n_h
+    k = 0
+    for i, angle in enumerate(ANGLE_RANGE):
+        for j, height in enumerate(HEIGHT_RANGE):
+            k += 1
+            print(
+                f"  [combined sweep] {k:3d}/{total}  "
+                f"\u03b8 = {angle:5.1f}\u00b0  h = {height * 1e3:5.1f} mm  \u2026",
+                end="",
+                flush=True,
+            )
+            res = _run_simulation(laser_angle=angle, source_z=height)
+            _enrich_with_gradient(res)
+            max_sub[i, j]   = res["max_sub_flux"]
+            max_roll[i, j]  = res["max_roll_flux"]
+            peak_diff[i, j] = res["peak_abs_diff"]
+            mean_diff[i, j] = res["mean_abs_diff"]
+            print(
+                f"  max_sub = {res['max_sub_flux']:.4f}  "
+                f"peak|\u0394| = {res['peak_abs_diff']:.4f}"
+            )
+
+    return {
+        "angles":        ANGLE_RANGE,
+        "heights":       HEIGHT_RANGE,
+        "max_sub_flux":  max_sub,
+        "max_roll_flux": max_roll,
+        "peak_abs_diff": peak_diff,
+        "mean_abs_diff": mean_diff,
+    }
+
+
+def plot_combined_sensitivity(combined: dict,
+                              save_path: str | None = None) -> None:
+    """
+    Figure 5 — 2×2 heatmap grid of combined (angle, height) perturbation.
+
+    Each panel shows one output metric across the full angle × height parameter
+    space.  The nominal operating point is marked with a red star.  White
+    contour lines show iso-percentage deviations from the nominal value
+    (±5 %, ±10 %, ±20 %).
+
+    Layout
+    ------
+    Top-left    : peak substrate flux
+    Top-right   : peak tape flux
+    Bottom-left : peak |Δflux|  (substrate − tape)
+    Bottom-right: mean |Δflux|  (substrate − tape)
+    """
+    angles  = combined["angles"]           # degrees
+    heights = combined["heights"] * 1e3    # mm for display
+
+    metrics = [
+        ("max_sub_flux",  "Peak substrate flux (W)",        "Blues"),
+        ("max_roll_flux", "Peak tape flux (W)",              "Oranges"),
+        ("peak_abs_diff", "Peak |\u0394flux| sub\u2212tape (W)", "Greens"),
+        ("mean_abs_diff", "Mean |\u0394flux| sub\u2212tape (W)", "Purples"),
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(
+        "Combined Perturbation \u2014 Laser Angle \u00d7 Source Height\n"
+        "2-D heatmap of output flux metrics",
+        fontsize=13,
+    )
+
+    # Nominal indices (closest point in the swept grids)
+    nom_a_idx = int(np.argmin(np.abs(angles  - NOMINAL_LASER_ANGLE)))
+    nom_h_idx = int(np.argmin(np.abs(combined["heights"] - NOMINAL_SOURCE_Z)))
+
+    # Meshgrid: heights on x-axis, angles on y-axis
+    H_grid, A_grid = np.meshgrid(heights, angles)
+
+    iso_pct = [-20.0, -10.0, -5.0, 5.0, 10.0, 20.0]
+
+    for ax, (key, label, cmap_name) in zip(axes.flat, metrics):
+        data = combined[key]   # shape (n_angle, n_height)
+
+        pcm = ax.pcolormesh(H_grid, A_grid, data, cmap=cmap_name, shading="auto")
+        plt.colorbar(pcm, ax=ax, label=label, fraction=0.046, pad=0.04)
+
+        # White contour lines at ±5 %, ±10 %, ±20 % from nominal
+        nominal_val = data[nom_a_idx, nom_h_idx]
+        if nominal_val > 0:
+            contour_levels = sorted(
+                nominal_val * (1.0 + p / 100.0) for p in iso_pct
+            )
+            cs = ax.contour(
+                H_grid, A_grid, data,
+                levels=contour_levels,
+                colors="white", linewidths=0.8, alpha=0.8,
+            )
+            ax.clabel(
+                cs,
+                fmt=lambda v, _nv=nominal_val: f"{(v / _nv - 1.0) * 100:+.0f}%",
+                fontsize=7,
+                inline=True,
+            )
+
+        # Mark nominal operating point
+        ax.plot(
+            heights[nom_h_idx], angles[nom_a_idx],
+            "r*", markersize=14, zorder=5,
+            label=f"Nominal ({NOMINAL_LASER_ANGLE}\u00b0, {NOMINAL_SOURCE_Z * 1e3:.0f}\u202fmm)",
+        )
+
+        ax.set_xlabel("Source height (mm)", fontsize=10)
+        ax.set_ylabel("Laser incidence angle (\u00b0)", fontsize=10)
+        ax.set_title(label, fontsize=11)
+        ax.legend(fontsize=7, loc="upper left", framealpha=0.7)
+
+    plt.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"  Saved \u2192 {save_path}")
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -588,6 +731,11 @@ def main() -> None:
     height_results = sweep_height()
     print()
 
+    # ── Sweep 3: combined angle × height grid ─────────────────────────────
+    print("Running combined angle × height sweep …")
+    combined_results = sweep_combined()
+    print()
+
     # ── Plots ──────────────────────────────────────────────────────────────
     print("Generating plots …")
 
@@ -608,6 +756,10 @@ def main() -> None:
         angle_results,
         height_results,
         save_path="sensitivity_flux_gradient_profiles.png",
+    )
+    plot_combined_sensitivity(
+        combined_results,
+        save_path="sensitivity_combined_heatmap.png",
     )
 
     print()
