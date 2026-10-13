@@ -55,9 +55,16 @@ class VectorizedRayBatch:
 class VectorizedSurface(ABC):
     """Abstract base class for vectorized surface operations"""
     
-    def __init__(self, surface_id: int, refractive_index: float = 1.8):
+    def __init__(self, surface_id: int, refractive_index: float = 1.8,
+                 extinction_coeff: float = 0.0):
         self.surface_id = surface_id
-        self.refractive_index = refractive_index
+        self.refractive_index = refractive_index      # real part n
+        self.extinction_coeff = extinction_coeff      # imaginary part k
+        
+    @property
+    def complex_index(self) -> complex:
+        """Complex refractive index N = n + i*k"""
+        return complex(self.refractive_index, self.extinction_coeff)
         
     @abstractmethod
     def intersect_rays_vectorized(self, ray_batch: VectorizedRayBatch) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -81,8 +88,10 @@ class VectorizedSurface(ABC):
 class VectorizedRoller(VectorizedSurface):
     """Vectorized roller surface - quarter circle arc with center at (0, radius)"""
     
-    def __init__(self, radius: float = 35e-3, refractive_index: float = 1.8):
-        super().__init__(surface_id=0, refractive_index=refractive_index)
+    def __init__(self, radius: float = 35e-3, refractive_index: float = 1.8,
+                 extinction_coeff: float = 0.0):
+        super().__init__(surface_id=0, refractive_index=refractive_index,
+                         extinction_coeff=extinction_coeff)
         self.radius = radius
         self.center = np.array([0.0, radius])  # Center at (0, radius)
         
@@ -167,8 +176,10 @@ class VectorizedRoller(VectorizedSurface):
 class VectorizedSubstrate(VectorizedSurface):
     """Vectorized substrate surface - horizontal line"""
     
-    def __init__(self, length: float = 100e-3, refractive_index: float = 1.8):
-        super().__init__(surface_id=1, refractive_index=refractive_index)
+    def __init__(self, length: float = 100e-3, refractive_index: float = 1.8,
+                 extinction_coeff: float = 0.0):
+        super().__init__(surface_id=1, refractive_index=refractive_index,
+                         extinction_coeff=extinction_coeff)
         self.length = length
         
     def intersect_rays_vectorized(self, ray_batch: VectorizedRayBatch) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -230,8 +241,9 @@ class VectorizedSubstrate(VectorizedSurface):
 class VectorizedCurvedSubstrate(VectorizedRoller):
     """Vectorized curved substrate surface - half circle arc mirrored through Y axis"""
     
-    def __init__(self, radius: float = 35e-3, refractive_index: float = 1.8):
-        super().__init__(radius, refractive_index)
+    def __init__(self, radius: float = 35e-3, refractive_index: float = 1.8,
+                 extinction_coeff: float = 0.0):
+        super().__init__(radius, refractive_index, extinction_coeff)
         self.surface_id = 1  # Override surface_id to be substrate
         self.center = np.array([0.0, -radius])  # Mirror through Y axis: center at (0, -radius)
         
@@ -376,7 +388,8 @@ class VectorizedRayTracer:
     
     def __init__(self, laser: VectorizedLaser, roller: VectorizedRoller, 
                  substrate: VectorizedSubstrate, max_reflections: int = 4,
-                 min_power_threshold_fraction: float = 1e-5):
+                 min_power_threshold_fraction: float = 1e-5,
+                 legacy_fresnel: bool = False):
         """
         Initialize ray tracer with power-independent threshold
         
@@ -386,7 +399,10 @@ class VectorizedRayTracer:
             substrate: Substrate surface geometry  
             max_reflections: Maximum number of reflections to trace
             min_power_threshold_fraction: Relative threshold (e.g., 1e-5 means 0.001% of total power)
+            legacy_fresnel: If True, use the former real-index dielectric Fresnel model
+                (extinction coefficient k ignored). Kept for comparison/regression tests.
         """
+        self.legacy_fresnel = legacy_fresnel
         self.laser = laser
         self.roller = roller
         self.substrate = substrate
@@ -398,8 +414,10 @@ class VectorizedRayTracer:
         # Storage for all ray generations
         self.all_ray_batches = []
         
-    def fresnel_reflectance_vectorized(self, theta: np.ndarray, n1: float, n2: float) -> np.ndarray:
-        """Calculate Fresnel reflection coefficient for unpolarized light"""
+    @staticmethod
+    def fresnel_reflectance_dielectric(theta: np.ndarray, n1: float, n2: float) -> np.ndarray:
+        """Former model: Fresnel reflectance for unpolarized light, REAL indices only
+        (lossless dielectric, with total internal reflection handling)."""
         theta = np.asarray(theta)
         result = np.zeros_like(theta, dtype=float)
         
@@ -418,6 +436,34 @@ class VectorizedRayTracer:
             result[non_tir_mask] = (r_s + r_p) / 2
         
         return result
+    
+    def fresnel_reflectance_vectorized(self, theta: np.ndarray, n1, n2) -> np.ndarray:
+        """Fresnel reflectance for unpolarized light, n1 and n2 may be complex (N = n + ik).
+        
+        Complex Snell law: N1 sin(theta_i) = N2 sin(theta_t)
+            cos(theta_t) = sqrt(1 - (N1/N2 sin(theta_i))^2)   (principal root)
+            r_s = (N1 cos_i - N2 cos_t) / (N1 cos_i + N2 cos_t)
+            r_p = (N2 cos_i - N1 cos_t) / (N2 cos_i + N1 cos_t)
+            R   = (|r_s|^2 + |r_p|^2) / 2
+        With k = 0 and n1 < n2 this reduces to the dielectric model. If
+        self.legacy_fresnel is set, the imaginary part is dropped and the former
+        real-index formula is used.
+        """
+        theta = np.asarray(theta, dtype=float)
+        if self.legacy_fresnel:
+            return self.fresnel_reflectance_dielectric(theta, np.real(n1), np.real(n2))
+        
+        N1 = complex(n1)
+        N2 = complex(n2)
+        cos_i = np.cos(theta)
+        sin_i = np.sin(theta)
+        cos_t = np.sqrt(1.0 - (N1 / N2 * sin_i) ** 2 + 0j)
+        # principal root must have Re >= 0 (it does); guard the sign convention anyway
+        cos_t = np.where(cos_t.real < 0, -cos_t, cos_t)
+        
+        r_s = (N1 * cos_i - N2 * cos_t) / (N1 * cos_i + N2 * cos_t)
+        r_p = (N2 * cos_i - N1 * cos_t) / (N2 * cos_i + N1 * cos_t)
+        return 0.5 * (np.abs(r_s) ** 2 + np.abs(r_p) ** 2)
     
     def find_nearest_intersections_vectorized(self, ray_batch: VectorizedRayBatch) -> None:
         """Find nearest surface intersection for all active rays"""
@@ -505,13 +551,13 @@ class VectorizedRayTracer:
         if np.any(roller_hits):
             incident_angles = np.arccos(cos_incident[roller_hits])
             roller_reflectance = self.fresnel_reflectance_vectorized(
-                incident_angles, 1.0, self.roller.refractive_index)
+                incident_angles, 1.0, self.roller.complex_index)
             reflectances[roller_hits] = roller_reflectance
             
         if np.any(substrate_hits):
             incident_angles = np.arccos(cos_incident[substrate_hits])
             substrate_reflectance = self.fresnel_reflectance_vectorized(
-                incident_angles, 1.0, self.substrate.refractive_index)
+                incident_angles, 1.0, self.substrate.complex_index)
             reflectances[substrate_hits] = substrate_reflectance
         
         # Compute reflected powers
@@ -730,7 +776,7 @@ class VectorizedRayTracer:
             
             # Calculate incident angles and Fresnel reflectance for each ray
             incident_angles = np.arccos(cos_incident)
-            reflectances = self.fresnel_reflectance_vectorized(incident_angles, 1.0, surface.refractive_index)
+            reflectances = self.fresnel_reflectance_vectorized(incident_angles, 1.0, surface.complex_index)
             
             # Calculate absorption fraction for each ray (1 - reflectance)
             absorption_fractions = 1.0 - reflectances
@@ -834,7 +880,7 @@ class VectorizedRayTracer:
                         cos_incident = np.clip(cos_incident, 0, 1)
                         
                         incident_angles = np.arccos(cos_incident)
-                        reflectances = self.fresnel_reflectance_vectorized(incident_angles, 1.0, surface.refractive_index)
+                        reflectances = self.fresnel_reflectance_vectorized(incident_angles, 1.0, surface.complex_index)
                         absorption_fractions = 1.0 - reflectances
                         
                         total_weighted_absorption += np.sum(absorption_fractions * hit_powers)

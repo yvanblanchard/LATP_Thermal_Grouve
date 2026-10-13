@@ -293,7 +293,8 @@ OPTICAL_MODEL_PARAMS = {
     'yl': -150,            # mm - laser source y-position (negative = left of nip-point)
     'zl': 60.50,              # mm - laser source z-position (height above nip-point)
     'hl': 30,              # mm - laser source length (matches PROCESS_PARAMS beam_width)
-    'n_tape': 1.5,         # refractive index of tape / substrate
+    'n_tape': 1.5,         # refractive index of tape / substrate (real part n)
+    'k_tape': 0.0,         # extinction coefficient of tape / substrate (imaginary part k, N = n + ik)
     'n_roller': 1.4        # refractive index of roller (kept for reference)
 }
 
@@ -305,7 +306,7 @@ RAY_TRACING_PARAMS = {
     'num_flux_points': 200                   # spatial discretization points for flux profile
 }
 
-def compute_heat_fluxes_from_ray_tracing(laser_angle_deg):
+def compute_heat_fluxes_from_ray_tracing(laser_angle_deg, legacy_fresnel=False):
     """Compute heat flux distributions using 2D vectorized ray tracing.
 
     Runs VectorizedRayTracer for the given laser angle and returns substrate and
@@ -317,6 +318,8 @@ def compute_heat_fluxes_from_ray_tracing(laser_angle_deg):
     ----------
     laser_angle_deg : float
         Laser incidence angle in degrees.
+    legacy_fresnel : bool
+        If True, use the former real-index dielectric Fresnel model (k ignored).
 
     Returns
     -------
@@ -340,17 +343,20 @@ def compute_heat_fluxes_from_ray_tracing(laser_angle_deg):
 
     roller = VectorizedRoller(
         radius=OPTICAL_MODEL_PARAMS['Rr'] / 1000.0,
-        refractive_index=OPTICAL_MODEL_PARAMS['n_tape']
+        refractive_index=OPTICAL_MODEL_PARAMS['n_tape'],
+        extinction_coeff=OPTICAL_MODEL_PARAMS['k_tape']
     )
     substrate = VectorizedSubstrate(
         length=OPTICAL_MODEL_PARAMS['substrate_length'],
-        refractive_index=OPTICAL_MODEL_PARAMS['n_tape']
+        refractive_index=OPTICAL_MODEL_PARAMS['n_tape'],
+        extinction_coeff=OPTICAL_MODEL_PARAMS['k_tape']
     )
 
     tracer = VectorizedRayTracer(
         laser, roller, substrate,
         max_reflections=RAY_TRACING_PARAMS['max_reflections'],
-        min_power_threshold_fraction=RAY_TRACING_PARAMS['min_power_threshold_fraction']
+        min_power_threshold_fraction=RAY_TRACING_PARAMS['min_power_threshold_fraction'],
+        legacy_fresnel=legacy_fresnel
     )
 
     print(f"Ray tracing heat flux computation (alpha={laser_angle_deg}°)...")
